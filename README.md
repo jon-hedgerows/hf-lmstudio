@@ -16,11 +16,9 @@ That's it. The `hf lmstudiosync` command is now available alongside the built-in
 
 ## Usage
 
-Select and link models interactively:
-`hf lmstudiosync`
+Select and link models interactively: `hf lmstudiosync`
 
-Link all MLX and GGUF models:
-`hf lmstudiosync --all`
+~~Link all MLX and GGUF models: `hf lmstudiosync --all`~~ _(not implemented, yet)_
 
 ### Requirements
 
@@ -29,3 +27,8 @@ Link all MLX and GGUF models:
 ## Acknowledgements
 
 Based on an original idea by Ivan Fioravanti [lmstudio_hf](https://github.com/ivanfioravanti/lmstudio_hf)
+
+## TO DO
+
+1. implement --all|-a
+2. actually work out which models are MLX and GGUF and only sync these - at the moment if there's a config.json file this incorrectly reports it as MLX, and will sync to LM Studio. LM Studio can't use, say, clip architecture models.
