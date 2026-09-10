@@ -1,0 +1,5 @@
+# ignore any build artefacts, just in case
+**.egg-info**
+
+# ignore any venv
+venv
