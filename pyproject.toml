@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hf-lmstudio"
 version = "0.0.1"
-description = "Links models in the hf cache to the LM Studio/Bionic downloads folder."
+description = "Link models in the hf cache to the LM Studio/Bionic downloads folder."
 authors = [{ name = "Jon Davies" }, { name = "Ivan Fioravanti" }]
 requires-python = ">=3.10"
 dependencies = []

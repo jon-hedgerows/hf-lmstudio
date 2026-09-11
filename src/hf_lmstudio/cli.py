@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import shutil
 import glob
+import argparse
 
 # credit: much of this was written by Ivan Fioravanti
 
@@ -16,7 +17,7 @@ def select_models(model_choices):
     while True:
         print("\033[H\033[J", end="")
         print(
-            "❯ hf-lmstudio - Hugging Face Model Link \nAvailable models (↑/↓ to navigate, SPACE to select, ENTER to confirm, Ctrl+C to quit):"
+            "❯ hf lmstudio - Hugging Face Model Link \nAvailable models (↑/↓ to navigate, SPACE to select, ENTER to confirm, Ctrl+C to quit):"
         )
 
         window_start = max(
@@ -92,8 +93,8 @@ def get_model_type(snapshot_path, repo_id):
     return "Unknown"
 
 
-def manage_models():
-    "Import models from the Hugging Face cache."
+def manage_models(autolink_all: bool = False):
+    """Import models from the Hugging Face cache."""
     # the hub dir is set by $HF_HUB_CACHE if defined, or $HF_HOME/hub if defined, or ~/.cache/huggingface/hub
     hub_dir = Path(
         os.environ.get(
@@ -143,22 +144,32 @@ def manage_models():
         print("No models found in Hugging Face cache")
         return
 
-    # Create list of models with their current import status
-    model_choices = []
+    if autolink_all:
+        # When autolink_all is true, select all found models
+        ## TODO: update is_imported based on whether it really is or not... or just set it to selected
+        selected = [
+            (model_type, model, is_imported, snapshot_path)
+            for model_type, model, is_imported, snapshot_path in found_models
+        ]
+        print("\nImporting all models...\n")
+    else:
+        # Create list of models with their current import status
+        model_choices = []
 
-    for model_type, model, snapshot_path in sorted(
-        found_models, key=lambda elem: elem[1].lower()
-    ):
-        target_path = lm_studio_dir / f"{model}"
-        is_imported = target_path.exists()
-        status = " (already imported)" if is_imported else ""
-        display_name = f"({model_type}) {model}{status}"
-        model_choices.append((display_name, model, is_imported, snapshot_path))
+        for model_type, model, snapshot_path in sorted(
+            found_models, key=lambda elem: elem[1].lower()
+        ):
+            target_path = lm_studio_dir / f"{model}"
+            is_imported = target_path.exists()
+            status = " (already imported)" if is_imported else ""
+            display_name = f"({model_type}) {model}{status}"
+            model_choices.append((display_name, model, is_imported, snapshot_path))
 
-    # Show interactive selection menu
-    selected = select_models(model_choices)
-    print("\nImporting models...\n")
+        # Show interactive selection menu
+        selected = select_models(model_choices)
+        print("\nImporting models...\n")
 
+    ## TODO: update to link selected things, and delink unselected things
     for display_name, model_name, is_imported, snapshot_path in selected:
         target_path = lm_studio_dir / f"{model_name}"
 
@@ -185,7 +196,18 @@ def manage_models():
 
 def main():
     """Entry point for uvx execution"""
-    manage_models()
+    parser = argparse.ArgumentParser(
+        prog="hf lmstudio",
+        description="Link models in the hf cache to the LM Studio/Bionic downloads folder.",
+    )
+    parser.add_argument(
+        "--all",
+        "-a",
+        action="store_true",
+        help="Link all models without interactive selection",
+    )
+    args = parser.parse_args()
+    manage_models(autolink_all=args.all)
 
 
 if __name__ == "__main__":
