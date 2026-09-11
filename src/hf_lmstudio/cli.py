@@ -5,7 +5,7 @@ import sys
 import shutil
 import glob
 
-# credit: most of this was written by Ivan Fioravanti
+# credit: much of this was written by Ivan Fioravanti
 
 
 def select_models(model_choices):
@@ -64,6 +64,34 @@ def get_key():
     return ch
 
 
+def get_model_type(snapshot_path, repo_id):
+    """
+    Determines the model format
+    """
+    # 1. Local GGUF Check: Look for .gguf files in the snapshot directory
+    if any(item.suffix == ".gguf" for item in Path(snapshot_path).iterdir()):
+        return "GGUF"
+
+    # 2. Organization Check: If it's in mlx-community, assume it's a MLX model
+    if repo_id.startswith("mlx-community/"):
+        return "MLX"
+
+    # 3. Try reading from config.json
+    if os.path.exists(os.path.join(snapshot_path, "config.json")):
+        try:
+            with open(os.path.join(snapshot_path, "config.json")) as f:
+                config = json.load(f)
+                model_type = config.get("model_type", "").lower()
+                return model_type
+        except (json.JSONDecodeError, FileNotFoundError):
+            # failed to read an existing config.json, skip this model
+            pass
+
+    # 4. We don't know - at this point there may be some more information available
+    # in the huggingface API
+    return "Unknown"
+
+
 def manage_models():
     "Import models from the Hugging Face cache."
     # the hub dir is set by $HF_HUB_CACHE if defined, or $HF_HOME/hub if defined, or ~/.cache/huggingface/hub
@@ -102,20 +130,12 @@ def manage_models():
                 snapshot_path = os.path.join(snapshots_dir, ref)
                 # and get the model name
                 parts = model_dir.split("--")
+
                 model_name = "/".join(parts[1:])
-                # and work out whether we have a MLX or GGUF model
-                # if a config.json exists, read the type
-                if os.path.exists(os.path.join(snapshot_path, "config.json")):
-                    try:
-                        with open(os.path.join(snapshot_path, "config.json")) as f:
-                            config = json.load(f)
-                            model_type = f"MLX({config.get("model_type", "").lower()})"
-                    except (json.JSONDecodeError, FileNotFoundError):
-                        # failed to read an existing config.json, skip this model
-                        continue
-                else:
-                    # otherwise assume it's a GGUF model...
-                    model_type = "GGUF"
+
+                # Determine model type accurately using the helper function
+                model_type = get_model_type(snapshot_path, model_name)
+
                 # Store model_type, model_name, and snapshot_path
                 found_models.add((model_type, model_name, snapshot_path))
 
@@ -125,7 +145,10 @@ def manage_models():
 
     # Create list of models with their current import status
     model_choices = []
-    for model_type, model, snapshot_path in sorted(found_models):
+
+    for model_type, model, snapshot_path in sorted(
+        found_models, key=lambda elem: elem[1].lower()
+    ):
         target_path = lm_studio_dir / f"{model}"
         is_imported = target_path.exists()
         status = " (already imported)" if is_imported else ""
