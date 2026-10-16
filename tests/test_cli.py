@@ -328,6 +328,59 @@ class TestIsFullyLinked(unittest.TestCase):
         self.assertFalse(cli.is_fully_linked(self.lm, "org/model-a", self.snap))
 
 
+class TestNoChangeOnConfirm(unittest.TestCase):
+    """Already-imported models are pre-selected; confirming with no changes
+    leaves linked models untouched (clarification to SPEC §2.6)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.lm = Path(self.tmp) / "lm"
+        self.lm.mkdir()
+        self.hub = Path(self.tmp) / "hub"
+        self.hub.mkdir()
+
+    def _snapshot(self, name, files):
+        snap = self.hub / "snapshots" / name
+        snap.mkdir(parents=True)
+        for fn, content in files.items():
+            p = snap / fn
+            if content is None:
+                p.write_bytes(b"\x00" * 10)
+            else:
+                p.write_text(content)
+        return snap
+
+    def test_pre_select_already_imported(self):
+        snap = self._snapshot("aaa", {
+            "config.json": '{"model_type": "llama"}',
+            "weights.bin": None,
+        })
+        discovered = [("llama", "org/model-a", str(snap))]
+        # Fully link the model first.
+        cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
+        tgt = self.lm / "org/model-a"
+        # UI initialization: fully linked → pre-selected (is_fully_linked True).
+        self.assertTrue(cli.is_fully_linked(self.lm, "org/model-a", snap))
+
+    def test_confirm_with_no_changes_makes_no_changes(self):
+        snap = self._snapshot("aaa", {
+            "config.json": '{"model_type": "llama"}',
+            "weights.bin": None,
+        })
+        discovered = [("llama", "org/model-a", str(snap))]
+        # Fully link the model.
+        cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
+        tgt = self.lm / "org/model-a"
+        before_config = os.readlink(tgt / "config.json")
+        before_weights = os.readlink(tgt / "weights.bin")
+        # User confirms with no changes: model stays selected, apply_desired_state
+        # is called with it in desired. Correct symlinks are skipped — nothing changes.
+        cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
+        self.assertEqual(os.readlink(tgt / "config.json"), before_config)
+        self.assertEqual(os.readlink(tgt / "weights.bin"), before_weights)
+        self.assertTrue(cli.is_fully_linked(self.lm, "org/model-a", snap))
+
+
 class TestApplyDesiredStateExtended(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

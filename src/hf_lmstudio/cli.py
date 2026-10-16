@@ -231,7 +231,9 @@ def is_fully_linked(lm_dir, model_name, snapshot_path):
         if not link_path.is_symlink():
             return False
         try:
-            if Path(os.readlink(link_path)).resolve() != item.resolve():
+            # realpath resolves the symlink target relative to its location,
+            # which is required for relative symlink targets in the HF cache.
+            if os.path.realpath(link_path) != os.path.realpath(item):
                 return False
         except OSError:
             return False
@@ -291,8 +293,10 @@ def apply_desired_state(lm_dir, discovered, desired):
                 link_path = target_path / item.name
                 if link_path.is_symlink():
                     # Keep a correct symlink; replace a wrong one.
+                    # realpath resolves relative symlink targets against the
+                    # link's location (HF cache snapshots use relative paths).
                     try:
-                        if Path(os.readlink(link_path)).resolve() == item.resolve():
+                        if os.path.realpath(link_path) == os.path.realpath(item):
                             continue  # already correct
                     except OSError:
                         pass
