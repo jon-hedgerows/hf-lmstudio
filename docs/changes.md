@@ -191,6 +191,114 @@ Unchanged per SPEC: the interactive raw-mode UI (already matches §2.7),
 POSIX-only terminal handling (limitation 4 in §6 remains documented), and
 `Design.md` / `model_type_changes.md` remain as historical context (§5).
 
+## Further changes after spec clarification (`e1c95a1 clarify spec`)
+
+The clarified SPEC (§2.6) adds UI initialization rules that my implementation
+does not yet meet:
+
+- A model shows in the UI as **selected** only when it is already *fully and
+  correctly symlinked* in LM Studio.
+- A model shows as **unselected** when it is not found in LM Studio, or when
+  the symlinks are *incomplete*.
+- Directories must not be removed unless they previously contained a symlink
+  to the hf cache.
+- No existing _files_ are ever modified; existing symlinks may be updated,
+  created, or removed; directory structures should be updated, created, or
+  removed as required.
+
+The §6 "Known Limitations / Future Work" section was removed, so `--all`,
+model-type accuracy, and symlink bookkeeping are now expected behaviour, not
+limitations.
+
+### Step 9 — Fix UI initialization: "fully and correctly symlinked" (SPEC §2.6)
+
+**Goal:** The UI must show a model as selected only when every snapshot file
+is present as a correct symlink in LM Studio; incomplete or missing links show
+as unselected.
+
+**Problem:** `select_desired` currently uses `target_path.is_symlink()`, but
+linked targets are directories containing symlinks, not symlinks themselves.
+So a fully linked model would show as unselected in the UI.
+
+**Changes (`src/hf_lmstudio/cli.py`):**
+- Add `is_fully_linked(lm_dir, model_name, snapshot_path) -> bool`:
+  - Returns `False` if target does not exist or is not a directory.
+  - Returns `False` if any snapshot file is missing from the target, or if a
+    target entry exists but is not a symlink pointing at the corresponding
+    snapshot file.
+  - Returns `True` only when all snapshot files are present as correct symlinks.
+- In `select_desired`, replace `target_path.is_symlink()` with
+  `is_fully_linked(lm_dir, model_name, snapshot_path)` to compute the
+  "(already imported)" status and initial selection state.
+
+**Verification (independent):**
+- Temp cache + LM dir with a fully linked model → shows as selected in UI.
+- Temp cache + LM dir with a partially linked model (missing one symlink) →
+  shows as unselected in UI.
+- Temp cache + LM dir with no link → shows as unselected.
+
+### Step 10 — Fix `apply_desired_state` to complete partial links (SPEC §2.5, §2.6)
+
+**Goal:** When a model is selected, any missing or incorrect symlinks are
+created/replaced without touching real user files. When unselected, only our
+own symlinks are removed; directories are removed only if empty (i.e. they
+contained only our symlinks).
+
+**Changes (`src/hf_lmstudio/cli.py`):**
+- For selected models: instead of skipping when the target directory exists,
+  iterate the snapshot files:
+  - If a target entry is a correct symlink → leave it.
+  - If a target entry is a wrong symlink → replace it.
+  - If a target entry is a real file/directory → skip it, report it (never
+    modify user files).
+  - If a target entry is missing → create the symlink.
+- For unselected models: keep current behaviour (remove our symlinks, then
+  `rmdir` if empty — this already satisfies "directories must not be removed
+  unless they previously contained a symlink to the hf cache").
+- If the target is a real file (not a directory) → skip, report.
+
+**Verification (independent):**
+- Partially linked model selected → missing symlinks created, existing ones
+  kept, real user files untouched.
+- Wrong symlink replaced with correct one.
+- Unselected model with our symlinks + user files → symlinks removed, user
+  files kept, directory kept if not empty.
+
+### Step 11 — Update tests and final verification (SPEC §5, §2)
+
+**Goal:** Test coverage for the clarified UI initialization and partial-link
+completion behaviour.
+
+**Changes:**
+- Add tests for `is_fully_linked`: fully linked, partially linked, missing
+  target, real file target, wrong symlink target.
+- Update `select_desired` tests to use `is_fully_linked`-based expectations.
+- Add tests for completing partial links in `apply_desired_state`.
+- Re-run `python -m unittest discover -s tests` — all must pass.
+
+**Verification (independent):**
+- End-to-end sandbox: link a model, re-run with `--all`, confirm it shows as
+  already linked (selected) and no changes are made; unlink it, confirm it
+  shows as unselected.
+
+## Completion (updated)
+
+| Step | Summary | SPEC clauses | Status |
+|------|---------|--------------|--------|
+| 1 | Skip unclassifiable models | §2.4 | Done |
+| 2 | Harden model discovery | §2.3 | Done |
+| 3 | Desired-state reconciliation | §2.5, §2.6 | Done |
+| 4 | Implement `--all` | §2.2, §6.1 | Done |
+| 5 | Dangling-symlink / empty-dir cleanup | §2.6, §6.3 | Done |
+| 6 | Model type accuracy via Hub API | §2.4, §6.2 | Done |
+| 7 | Tests (stdlib `unittest`) | §5 | Done |
+| 8 | End-to-end verification | §2 | Done |
+| 9 | Fix UI initialization: "fully and correctly symlinked" | §2.6 | Pending |
+| 10 | Complete partial links in `apply_desired_state` | §2.5, §2.6 | Pending |
+| 11 | Update tests and final verification | §5, §2 | Pending |
+
 ## Implementation order (recommended)
 
-1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Steps 1, 2, 5, and 6 are isolated function-level changes and can be done in parallel with 3/4, but Step 3's refactored `apply_desired_state` is the integration point for 4 and 5, so it should land before them.
+1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11. Steps 9 and 10 are
+interdependent (Step 9 changes how selection state is computed; Step 10
+changes how selection is applied), so Step 10 must follow Step 9.

@@ -214,6 +214,30 @@ def discover_models(hub_dir):
     return found_models
 
 
+def is_fully_linked(lm_dir, model_name, snapshot_path):
+    """Return True if every file in ``snapshot_path`` is present as a correct
+    symlink in ``lm_dir/model_name`` (SPEC §2.6 UI initialization).
+
+    A model shows in the UI as **selected** only when it is already fully and
+    correctly symlinked; it shows as **unselected** when not found in LM
+    Studio or when the symlinks are incomplete.
+    """
+    target_path = lm_dir / model_name
+    if not target_path.is_dir():
+        return False
+    snapshot_path = Path(snapshot_path)
+    for item in snapshot_path.iterdir():
+        link_path = target_path / item.name
+        if not link_path.is_symlink():
+            return False
+        try:
+            if Path(os.readlink(link_path)).resolve() != item.resolve():
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def select_desired(models, autolink_all, lm_dir):
     """Return the set of model names the user wants linked (desired state).
 
@@ -221,6 +245,10 @@ def select_desired(models, autolink_all, lm_dir):
     (SPEC §2.2). Otherwise the interactive menu defines desired state
     (SPEC §2.6): selected models must end up linked, unselected models must
     end up unlinked.
+
+    UI initialization: a model shows as selected when it is already fully and
+    correctly symlinked in LM Studio; it shows as unselected when not found
+    or when the symlinks are incomplete.
     """
     if autolink_all:
         return {model_name for _, model_name, _ in models}
@@ -229,8 +257,7 @@ def select_desired(models, autolink_all, lm_dir):
     for model_type, model_name, snapshot_path in sorted(
         models, key=lambda elem: elem[1].lower()
     ):
-        target_path = lm_dir / model_name
-        is_imported = target_path.is_symlink()
+        is_imported = is_fully_linked(lm_dir, model_name, snapshot_path)
         status = " (already imported)" if is_imported else ""
         display_name = f"({model_type}) {model_name}{status}"
         model_choices.append((display_name, model_name, is_imported, snapshot_path))
