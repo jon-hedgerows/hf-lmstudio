@@ -223,7 +223,7 @@ class TestApplyDesiredState(unittest.TestCase):
         cli.apply_desired_state(self.lm, discovered, set())
         self.assertFalse(tgt.exists(), "unselected symlink removed")
 
-    def test_skip_real_file_directory(self):
+    def test_preserve_real_files_in_directory(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
         discovered = [("llama", "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
@@ -231,7 +231,17 @@ class TestApplyDesiredState(unittest.TestCase):
         (tgt / "user_file.txt").write_text("keep me")
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         self.assertEqual((tgt / "user_file.txt").read_text(), "keep me")
-        self.assertFalse((tgt / "config.json").exists(), "real dir not overwritten")
+        self.assertTrue((tgt / "config.json").is_symlink(), "missing symlink added")
+
+    def test_skip_real_file_at_target(self):
+        snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
+        discovered = [("llama", "org/model-a", str(snap))]
+        tgt = self.lm / "org/model-a"
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        tgt.write_text("real file")
+        cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
+        self.assertEqual(tgt.read_text(), "real file", "real file not touched")
+        self.assertFalse((tgt / "config.json").exists(), "cannot create dir over file")
 
     def test_idempotent_relink(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
@@ -270,6 +280,110 @@ class TestCleanupDanglingLinks(unittest.TestCase):
         self.assertTrue((self.lm / "valid_link").is_symlink())
         self.assertEqual((self.lm / "real_file.txt").read_text(), "keep me")
         self.assertTrue((self.lm / "dangling_outside").is_symlink())
+
+
+class TestIsFullyLinked(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.lm = Path(self.tmp) / "lm"
+        self.lm.mkdir()
+        self.snap = Path(tempfile.mkdtemp())
+        (self.snap / "config.json").write_text('{"model_type": "llama"}')
+        (self.snap / "weights.bin").write_bytes(b"\x00" * 10)
+
+    def test_not_linked(self):
+        self.assertFalse(cli.is_fully_linked(self.lm, "org/model-a", self.snap))
+
+    def test_fully_linked(self):
+        tgt = self.lm / "org" / "model-a"
+        tgt.mkdir(parents=True)
+        for item in self.snap.iterdir():
+            (tgt / item.name).symlink_to(item)
+        self.assertTrue(cli.is_fully_linked(self.lm, "org/model-a", self.snap))
+
+    def test_partially_linked(self):
+        tgt = self.lm / "org" / "model-a"
+        tgt.mkdir(parents=True)
+        (tgt / "config.json").symlink_to(self.snap / "config.json")
+        # weights.bin missing
+        self.assertFalse(cli.is_fully_linked(self.lm, "org/model-a", self.snap))
+
+    def test_wrong_symlink_target(self):
+        tgt = self.lm / "org" / "model-a"
+        tgt.mkdir(parents=True)
+        (tgt / "config.json").symlink_to("/tmp/wrong_target")
+        (tgt / "weights.bin").symlink_to(self.snap / "weights.bin")
+        self.assertFalse(cli.is_fully_linked(self.lm, "org/model-a", self.snap))
+
+    def test_real_file_target(self):
+        tgt = self.lm / "org" / "model-a"
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        tgt.write_text("not a directory")
+        self.assertFalse(cli.is_fully_linked(self.lm, "org/model-a", self.snap))
+
+    def test_symlink_target_instead_of_dir(self):
+        tgt = self.lm / "org" / "model-a"
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        tgt.symlink_to(self.snap)
+        self.assertFalse(cli.is_fully_linked(self.lm, "org/model-a", self.snap))
+
+
+class TestApplyDesiredStateExtended(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.lm = Path(self.tmp) / "lm"
+        self.lm.mkdir()
+        self.hub = Path(self.tmp) / "hub"
+        self.hub.mkdir()
+
+    def _snapshot(self, name, files):
+        snap = self.hub / "snapshots" / name
+        snap.mkdir(parents=True)
+        for fn, content in files.items():
+            p = snap / fn
+            if content is None:
+                p.write_bytes(b"\x00" * 10)
+            else:
+                p.write_text(content)
+        return snap
+
+    def test_complete_partial_links(self):
+        snap = self._snapshot("aaa", {
+            "config.json": '{"model_type": "llama"}',
+            "weights.bin": None,
+        })
+        discovered = [("llama", "org/model-a", str(snap))]
+        # Pre-create only config.json symlink (partial link)
+        tgt = self.lm / "org/model-a"
+        tgt.mkdir(parents=True)
+        (tgt / "config.json").symlink_to(snap / "config.json")
+        cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
+        self.assertTrue((tgt / "config.json").is_symlink())
+        self.assertTrue((tgt / "weights.bin").is_symlink())
+
+    def test_replace_wrong_symlink(self):
+        snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
+        discovered = [("llama", "org/model-a", str(snap))]
+        tgt = self.lm / "org/model-a"
+        tgt.mkdir(parents=True)
+        (tgt / "config.json").symlink_to("/tmp/wrong_target")
+        cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
+        self.assertTrue((tgt / "config.json").is_symlink())
+        self.assertNotEqual(os.readlink(tgt / "config.json"), "/tmp/wrong_target")
+
+    def test_preserve_real_files_when_completing(self):
+        snap = self._snapshot("aaa", {
+            "config.json": '{"model_type": "llama"}',
+            "weights.bin": None,
+        })
+        discovered = [("llama", "org/model-a", str(snap))]
+        tgt = self.lm / "org/model-a"
+        tgt.mkdir(parents=True)
+        (tgt / "config.json").symlink_to(snap / "config.json")
+        (tgt / "user_file.txt").write_text("keep me")
+        cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
+        self.assertEqual((tgt / "user_file.txt").read_text(), "keep me")
+        self.assertTrue((tgt / "weights.bin").is_symlink())
 
 
 class TestSelectDesired(unittest.TestCase):
