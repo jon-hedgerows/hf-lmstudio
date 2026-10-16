@@ -116,34 +116,50 @@ def manage_models(autolink_all: bool = False):
         # if there's an error while reading the models dir, set it to the default
         lm_studio_dir = Path(os.path.expanduser("~/.lmstudio/models"))
 
-    found_models = set()
+    found_models = []
+    seen_models = set()
     for model_dir in glob.glob(os.path.join(hub_dir, "models--*")):
         refs_dir = Path(os.path.join(model_dir, "refs"))
         snapshots_dir = Path(os.path.join(model_dir, "snapshots"))
         if not refs_dir.exists():
             continue
 
+        # and get the model name
+        parts = model_dir.split("--")
+        model_name = "/".join(parts[1:])
+
+        # Dedupe discovered models by model name: first snapshot wins.
+        if model_name in seen_models:
+            continue
+
         # Search for refs
         for ref_file in glob.glob(os.path.join(refs_dir, "*")):
-            with open(ref_file, "r", encoding="utf-8") as f:
-                ref = f.read()
-                # now have a snapshot reference, determine the snapshot path
-                snapshot_path = os.path.join(snapshots_dir, ref)
-                # and get the model name
-                parts = model_dir.split("--")
+            # Skip directory entries in refs/ (e.g. refs/refs/pr/1)
+            # described in docs/huggingface-cache.md (SPEC §2.3).
+            if not Path(ref_file).is_file():
+                continue
+            try:
+                with open(ref_file, "r", encoding="utf-8") as f:
+                    ref = f.read()
+            except OSError:
+                # Report and skip unreadable refs rather than crashing.
+                print(f"Skipping {model_name}: could not read ref {ref_file}")
+                continue
+            # now have a snapshot reference, determine the snapshot path
+            snapshot_path = os.path.join(snapshots_dir, ref)
 
-                model_name = "/".join(parts[1:])
+            # Determine model type accurately using the helper function
+            model_type = get_model_type(snapshot_path, model_name)
 
-                # Determine model type accurately using the helper function
-                model_type = get_model_type(snapshot_path, model_name)
+            # Models that cannot be classified are reported and skipped (SPEC §2.4)
+            if model_type == "Unknown":
+                print(f"Skipping {model_name}: could not classify model type")
+                continue
 
-                # Models that cannot be classified are reported and skipped (SPEC §2.4)
-                if model_type == "Unknown":
-                    print(f"Skipping {model_name}: could not classify model type")
-                    continue
-
-                # Store model_type, model_name, and snapshot_path
-                found_models.add((model_type, model_name, snapshot_path))
+            # Store model_type, model_name, and snapshot_path
+            found_models.append((model_type, model_name, snapshot_path))
+            seen_models.add(model_name)
+            break
 
     if not found_models:
         print("No models found in Hugging Face cache")
