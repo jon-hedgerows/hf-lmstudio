@@ -9,16 +9,16 @@ This allows LM Studio to share/use models that you previously downloaded with hf
 Install the extension straight from GitHub:
 
 ```shell
-hf extensions install jon-hedgerows/hf-lmstudiosync
+hf extensions install jon-hedgerows/hf-lmstudio
 ```
 
-That's it. The `hf lmstudiosync` command is now available alongside the built-in `hf` commands.
+That's it. The `hf lmstudio` command is now available alongside the built-in `hf` commands.
 
 ## Usage
 
-Select and link models interactively: `hf lmstudiosync`
+Select and link models interactively: `hf lmstudio`
 
-~~Link all MLX and GGUF models: `hf lmstudiosync --all`~~ _(not implemented, yet)_
+Link all models: `hf lmstudio --all`
 
 ### Requirements
 
@@ -27,8 +27,3 @@ Select and link models interactively: `hf lmstudiosync`
 ## Acknowledgements
 
 Based on an original idea by Ivan Fioravanti [lmstudio_hf](https://github.com/ivanfioravanti/lmstudio_hf)
-
-## TO DO
-
-1. implement --all|-a
-2. actually work out which models are MLX and GGUF and only sync these - at the moment if there's a config.json file this incorrectly reports it as MLX, and will sync to LM Studio. LM Studio can't use, say, clip architecture models.
