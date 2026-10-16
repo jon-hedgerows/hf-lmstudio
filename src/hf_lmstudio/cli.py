@@ -121,6 +121,7 @@ def manage_models(autolink_all: bool = False):
         return
 
     desired = select_desired(discovered, autolink_all, lm_studio_dir)
+    print(f"\nLinking {len(desired)} of {len(discovered)} models...\n")
     apply_desired_state(lm_studio_dir, discovered, desired)
 
 
