@@ -118,11 +118,15 @@ def manage_models(autolink_all: bool = False):
     discovered = discover_models(hub_dir)
     if not discovered:
         print("No models found in Hugging Face cache")
-        return
 
     desired = select_desired(discovered, autolink_all, lm_studio_dir)
-    print(f"\nLinking {len(desired)} of {len(discovered)} models...\n")
+    if discovered:
+        print(f"\nLinking {len(desired)} of {len(discovered)} models...\n")
     apply_desired_state(lm_studio_dir, discovered, desired)
+    # Always clean up dangling links, even when nothing was discovered: a
+    # model removed from the Hub cache leaves dangling links behind
+    # (SPEC §2.6, §6.3).
+    cleanup_dangling_links(lm_studio_dir, hub_dir)
 
 
 def discover_models(hub_dir):
@@ -163,6 +167,12 @@ def discover_models(hub_dir):
                 continue
             # now have a snapshot reference, determine the snapshot path
             snapshot_path = os.path.join(snapshots_dir, ref)
+            if not Path(snapshot_path).is_dir():
+                # Snapshot no longer in the cache (model removed). Skip it from
+                # discovery so any existing link is left for
+                # cleanup_dangling_links to remove (SPEC §6.3).
+                print(f"Skipping {model_name}: snapshot no longer in cache")
+                continue
 
             # Determine model type accurately using the helper function
             model_type = get_model_type(snapshot_path, model_name)
@@ -251,6 +261,48 @@ def apply_desired_state(lm_dir, discovered, desired):
                     print(f"Unlinked {model_name}")
                 except OSError:
                     print(f"Unlinked {model_name}: user files kept, directory remains")
+
+
+def cleanup_dangling_links(lm_dir, hub_dir):
+    """Remove dangling symlinks that point into the HF cache, then prune
+    now-empty directories (SPEC §2.6, §6.3).
+
+    This also removes links for models that have been removed from the Hub
+    cache: once the snapshot disappears, those symlinks dangle and are
+    cleaned up here. Only symlinks resolving inside hub_dir are candidates;
+    other dangling links are left alone. lm_dir itself is never removed.
+    """
+    hub_dir = Path(hub_dir).resolve()
+    lm_dir = Path(lm_dir)
+
+    # Bottom-up: handle entries before their containing directories.
+    for root, dirs, files in os.walk(lm_dir, topdown=False):
+        root_path = Path(root)
+        for name in list(files) + list(dirs):
+            entry = root_path / name
+            if not entry.is_symlink():
+                continue
+            # Dangling symlink: the target no longer exists on disk.
+            if os.path.exists(entry):
+                continue
+            try:
+                target = os.readlink(entry)
+                resolved = (root_path / target).resolve()
+            except OSError:
+                continue
+            # Only remove links that point into the Hugging Face cache.
+            if resolved == hub_dir or hub_dir in resolved.parents:
+                entry.unlink()
+
+    # Prune empty directories left behind, never removing lm_dir itself.
+    for root, dirs, files in os.walk(lm_dir, topdown=False):
+        root_path = Path(root)
+        if root_path == lm_dir:
+            continue
+        try:
+            root_path.rmdir()  # succeeds only when the directory is empty
+        except OSError:
+            pass
 
 
 def main():
