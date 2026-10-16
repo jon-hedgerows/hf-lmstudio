@@ -277,20 +277,28 @@ def apply_desired_state(lm_dir, discovered, desired):
     for _, model_name, snapshot_path in discovered:
         target_path = lm_dir / model_name
         if model_name in desired:
-            # Selected: ensure a directory of symlinks into the snapshot.
-            if target_path.exists() and not target_path.is_symlink():
-                print(f"Skipping {model_name}: real file/directory at link target")
+            # Selected: ensure every snapshot file is symlinked into the
+            # target directory. Never modify or delete real user files.
+            if target_path.exists() and not target_path.is_dir() and not target_path.is_symlink():
+                # Real file at the link target: never touch it.
+                print(f"Skipping {model_name}: real file at link target")
                 continue
             if target_path.is_symlink():
+                # Replace an existing symlink with a directory of symlinks.
                 target_path.unlink()
             target_path.mkdir(parents=True, exist_ok=True)
             for item in Path(snapshot_path).iterdir():
                 link_path = target_path / item.name
                 if link_path.is_symlink():
-                    # Replace an existing symlink we created.
+                    # Keep a correct symlink; replace a wrong one.
+                    try:
+                        if Path(os.readlink(link_path)).resolve() == item.resolve():
+                            continue  # already correct
+                    except OSError:
+                        pass
                     link_path.unlink()
                 elif link_path.exists():
-                    # Never overwrite a real user file.
+                    # Real user file/directory: never overwrite.
                     print(
                         f"Skipping {model_name}/{item.name}: real file at link target"
                     )
