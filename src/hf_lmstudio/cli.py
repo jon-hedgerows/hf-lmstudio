@@ -137,6 +137,11 @@ def manage_models(autolink_all: bool = False):
                 # Determine model type accurately using the helper function
                 model_type = get_model_type(snapshot_path, model_name)
 
+                # Models that cannot be classified are reported and skipped (SPEC §2.4)
+                if model_type == "Unknown":
+                    print(f"Skipping {model_name}: could not classify model type")
+                    continue
+
                 # Store model_type, model_name, and snapshot_path
                 found_models.add((model_type, model_name, snapshot_path))
 
