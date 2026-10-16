@@ -65,30 +65,55 @@ def get_key():
 
 
 def get_model_type(snapshot_path, repo_id):
+    """Classify a model as GGUF, MLX, or another type (SPEC §2.4).
+
+    Tiers, in order: local GGUF check, mlx-community organisation check,
+    Hub metadata (library/tags) via huggingface_hub, config.json model_type
+    fallback. Returns "Unknown" when nothing applies; callers skip those
+    models (SPEC §2.4).
     """
-    Determines the model format
-    """
-    # 1. Local GGUF Check: Look for .gguf files in the snapshot directory
-    if any(item.suffix == ".gguf" for item in Path(snapshot_path).iterdir()):
+    snapshot_path = Path(snapshot_path)
+    if not snapshot_path.is_dir():
+        return "Unknown"
+
+    # 1. Local GGUF check.
+    if any(item.suffix == ".gguf" for item in snapshot_path.iterdir()):
         return "GGUF"
 
-    # 2. Organization Check: If it's in mlx-community, assume it's a MLX model
+    # 2. Organisation check.
     if repo_id.startswith("mlx-community/"):
         return "MLX"
 
-    # 3. Try reading from config.json
-    if os.path.exists(os.path.join(snapshot_path, "config.json")):
+    # 3. Hub metadata (huggingface_hub is provided by the `hf` runtime, not a
+    #    hard dependency -- imported lazily, SPEC §4).
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo_id)
+        library = getattr(info, "library", None) or ""
+        tags = getattr(info, "tags", None) or []
+        tag_set = {str(t).lower() for t in tags}
+        if library.lower() == "gguf" or "gguf" in tag_set:
+            return "GGUF"
+        if library.lower() == "mlx" or "mlx" in tag_set:
+            return "MLX"
+    except Exception:
+        # ImportError, network error, private model, etc.: fall through.
+        pass
+
+    # 4. config.json fallback.
+    config_path = snapshot_path / "config.json"
+    if config_path.exists():
         try:
-            with open(os.path.join(snapshot_path, "config.json")) as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
-                model_type = config.get("model_type", "").lower()
+            model_type = config.get("model_type", "").lower()
+            if model_type:
                 return model_type
-        except (json.JSONDecodeError, FileNotFoundError):
-            # failed to read an existing config.json, skip this model
+        except (json.JSONDecodeError, OSError):
             pass
 
-    # 4. We don't know - at this point there may be some more information available
-    # in the huggingface API
+    # 5. Could not classify.
     return "Unknown"
 
 
