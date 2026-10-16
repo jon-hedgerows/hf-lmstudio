@@ -2,7 +2,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import shutil
 import glob
 import argparse
 
@@ -116,6 +115,22 @@ def manage_models(autolink_all: bool = False):
         # if there's an error while reading the models dir, set it to the default
         lm_studio_dir = Path(os.path.expanduser("~/.lmstudio/models"))
 
+    discovered = discover_models(hub_dir)
+    if not discovered:
+        print("No models found in Hugging Face cache")
+        return
+
+    desired = select_desired(discovered, autolink_all, lm_studio_dir)
+    apply_desired_state(lm_studio_dir, discovered, desired)
+
+
+def discover_models(hub_dir):
+    """Discover and classify models in the Hugging Face Hub cache.
+
+    Returns a list of (model_type, model_name, snapshot_path) tuples for
+    classifiable models. Unclassifiable models are reported and skipped
+    (SPEC §2.4); discovery never crashes on unusual cache layout (SPEC §2.3).
+    """
     found_models = []
     seen_models = set()
     for model_dir in glob.glob(os.path.join(hub_dir, "models--*")):
@@ -160,59 +175,81 @@ def manage_models(autolink_all: bool = False):
             found_models.append((model_type, model_name, snapshot_path))
             seen_models.add(model_name)
             break
+    return found_models
 
-    if not found_models:
-        print("No models found in Hugging Face cache")
-        return
 
+def select_desired(models, autolink_all, lm_dir):
+    """Return the set of model names the user wants linked (desired state).
+
+    With --all, every classifiable model is selected without a terminal
+    (SPEC §2.2). Otherwise the interactive menu defines desired state
+    (SPEC §2.6): selected models must end up linked, unselected models must
+    end up unlinked.
+    """
     if autolink_all:
-        # When autolink_all is true, select all found models
-        ## TODO: update is_imported based on whether it really is or not... or just set it to selected
-        selected = [
-            (model_type, model, is_imported, snapshot_path)
-            for model_type, model, is_imported, snapshot_path in found_models
-        ]
-        print("\nImporting all models...\n")
-    else:
-        # Create list of models with their current import status
-        model_choices = []
+        return {model_name for _, model_name, _ in models}
 
-        for model_type, model, snapshot_path in sorted(
-            found_models, key=lambda elem: elem[1].lower()
-        ):
-            target_path = lm_studio_dir / f"{model}"
-            is_imported = target_path.exists()
-            status = " (already imported)" if is_imported else ""
-            display_name = f"({model_type}) {model}{status}"
-            model_choices.append((display_name, model, is_imported, snapshot_path))
+    model_choices = []
+    for model_type, model_name, snapshot_path in sorted(
+        models, key=lambda elem: elem[1].lower()
+    ):
+        target_path = lm_dir / model_name
+        is_imported = target_path.is_symlink()
+        status = " (already imported)" if is_imported else ""
+        display_name = f"({model_type}) {model_name}{status}"
+        model_choices.append((display_name, model_name, is_imported, snapshot_path))
 
-        # Show interactive selection menu
-        selected = select_models(model_choices)
-        print("\nImporting models...\n")
+    selected = select_models(model_choices)
+    return {model_name for _, model_name, _, _ in selected}
 
-    ## TODO: update to link selected things, and delink unselected things
-    for display_name, model_name, is_imported, snapshot_path in selected:
-        target_path = lm_studio_dir / f"{model_name}"
 
-        if is_imported:
-            # Remove existing directory or symlink
-            if target_path.is_symlink() or target_path.exists():
-                if target_path.is_dir():
-                    shutil.rmtree(target_path)
-                else:
-                    target_path.unlink()
-            print(f"Removed {model_name}")
+def apply_desired_state(lm_dir, discovered, desired):
+    """Make the LM Studio dir match the desired state (SPEC §2.5, §2.6).
 
-        else:
-            # Create parent directories and target directory
+    Selected models are linked as a directory of symlinks into the HF cache;
+    unselected models have any existing link removed. Real files or
+    directories that the user created are never modified or deleted; only
+    symlinks we created are created or removed.
+    """
+    for _, model_name, snapshot_path in discovered:
+        target_path = lm_dir / model_name
+        if model_name in desired:
+            # Selected: ensure a directory of symlinks into the snapshot.
+            if target_path.exists() and not target_path.is_symlink():
+                print(f"Skipping {model_name}: real file/directory at link target")
+                continue
+            if target_path.is_symlink():
+                target_path.unlink()
             target_path.mkdir(parents=True, exist_ok=True)
-
-            # Create symbolic links for all files in the snapshot directory
             for item in Path(snapshot_path).iterdir():
                 link_path = target_path / item.name
+                if link_path.is_symlink():
+                    # Replace an existing symlink we created.
+                    link_path.unlink()
+                elif link_path.exists():
+                    # Never overwrite a real user file.
+                    print(
+                        f"Skipping {model_name}/{item.name}: real file at link target"
+                    )
+                    continue
                 os.symlink(item, link_path)
-
-            print(f"Imported {model_name} (symlinked files)")
+            print(f"Linked {model_name}")
+        else:
+            # Not selected: remove any link we created for this model.
+            if target_path.is_symlink():
+                target_path.unlink()
+                print(f"Unlinked {model_name}")
+            elif target_path.is_dir():
+                # Our link directory: drop the symlink entries we created, then
+                # remove the directory if it is now empty. User files are kept.
+                for child in list(target_path.iterdir()):
+                    if child.is_symlink():
+                        child.unlink()
+                try:
+                    target_path.rmdir()
+                    print(f"Unlinked {model_name}")
+                except OSError:
+                    print(f"Unlinked {model_name}: user files kept, directory remains")
 
 
 def main():
