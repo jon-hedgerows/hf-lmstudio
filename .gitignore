@@ -1,5 +1,6 @@
 # ignore any build artefacts, just in case
 **.egg-info**
+**.pyc
 
 # ignore any venv
 .venv
