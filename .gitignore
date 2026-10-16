@@ -1,6 +1,10 @@
-# ignore any build artefacts, just in case
-**.egg-info**
-**.pyc
-
 # ignore any venv
-.venv
+.venv/
+venv/
+
+# ignore compiled/pycache artifacts
+**/*.egg-info/
+**/__pycache__/
+*.py[cod]
+build/
+dist/
