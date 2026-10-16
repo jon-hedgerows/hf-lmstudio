@@ -163,6 +163,34 @@ This document plans the changes needed to bring `src/hf_lmstudio/cli.py` into co
 - Mark each step complete in this document.
 - `docs/Design.md` and `docs/model_type_changes.md` remain as historical context (SPEC §5); no further doc edits required unless behaviour diverges from SPEC again.
 
+## Completion
+
+All steps are implemented and verified, each in its own commit on the
+`spec-updates` branch:
+
+| Step | Summary | SPEC clauses | Status |
+|------|---------|--------------|--------|
+| 1 | Skip unclassifiable models | §2.4 | Done |
+| 2 | Harden model discovery | §2.3 | Done |
+| 3 | Desired-state reconciliation | §2.5, §2.6 | Done |
+| 4 | Implement `--all` | §2.2, §6.1 | Done |
+| 5 | Dangling-symlink / empty-dir cleanup | §2.6, §6.3 | Done |
+| 6 | Model type accuracy via Hub API | §2.4, §6.2 | Done |
+| 7 | Tests (stdlib `unittest`) | §5 | Done |
+| 8 | End-to-end verification | §2 | Done |
+
+Verification performed:
+- `python -m unittest discover -s tests` → 19 tests pass.
+- Sandbox runs of `manage_models` (interactive and `--all`, no TTY) confirm:
+  selected models linked, unselected models unlinked, unclassifiable models
+  skipped and reported, real user files/directories never modified, relinking
+  idempotent (no `FileExistsError`), cache-removed models pruned via dangling
+  cleanup.
+
+Unchanged per SPEC: the interactive raw-mode UI (already matches §2.7),
+POSIX-only terminal handling (limitation 4 in §6 remains documented), and
+`Design.md` / `model_type_changes.md` remain as historical context (§5).
+
 ## Implementation order (recommended)
 
 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Steps 1, 2, 5, and 6 are isolated function-level changes and can be done in parallel with 3/4, but Step 3's refactored `apply_desired_state` is the integration point for 4 and 5, so it should land before them.
