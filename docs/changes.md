@@ -275,7 +275,7 @@ All steps are implemented and verified, each in its own commit on the
 | 11 | Update tests and final verification | §5, §2 | Done |
 
 Verification performed:
-- `python -m unittest discover -s tests` → 31 tests pass.
+- `python -m unittest discover -s tests` → 32 tests pass.
 - Sandbox runs confirm: UI shows "already imported" only when fully and
   correctly symlinked; partial links are completed when selected; wrong
   symlinks are replaced; real user files are never modified; unselected
@@ -285,11 +285,12 @@ Verification performed:
 ### Additional clarification addressed (after `e1c95a1 clarify spec`)
 
 **UI pre-selection and "no changes on confirm" (SPEC §2.6):**
-- Already-imported (fully and correctly symlinked) models are pre-selected in
-  the UI via `is_fully_linked()`.
+- `select_models()` now initializes `selected[]` from the `is_imported` flag
+  in each `model_choices` entry, so fully and correctly symlinked models are
+  pre-selected (◉) in the UI before the user sees them.
 - Confirming with no changes calls `apply_desired_state()` with only the
   pre-selected models; correct symlinks are skipped, so nothing on disk
-  changes. Covered by `TestNoChangeOnConfirm`.
+  changes. Covered by `TestNoChangeOnConfirm` and `TestSelectModels`.
 
 Unchanged per SPEC: the interactive raw-mode UI (already matches §2.7),
 POSIX-only terminal handling (§2.7 / line 11), and `Design.md` /
