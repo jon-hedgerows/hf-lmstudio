@@ -9,7 +9,9 @@ import argparse
 
 
 def select_models(model_choices):
-    selected = [False] * len(model_choices)
+    # Pre-select models that are already imported (SPEC §2.6 clarification):
+    # a fully and correctly symlinked model shows as selected in the UI.
+    selected = [bool(choice[2]) for choice in model_choices]
     idx = 0
     window_size = os.get_terminal_size().lines - 5
 

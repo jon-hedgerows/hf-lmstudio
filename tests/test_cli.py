@@ -11,6 +11,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -437,6 +438,29 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         self.assertEqual((tgt / "user_file.txt").read_text(), "keep me")
         self.assertTrue((tgt / "weights.bin").is_symlink())
+
+
+class TestSelectModels(unittest.TestCase):
+    """select_models must pre-select already-imported models (SPEC §2.6)."""
+
+    def _make_choices(self):
+        # model_choices entries: (display_name, model_name, is_imported, snapshot_path)
+        snap = Path(tempfile.mkdtemp())
+        return [
+            ("(llama) org/imported", "org/imported", True, str(snap)),
+            ("(llama) org/not-imported", "org/not-imported", False, str(snap)),
+            ("(llama) org/also-imported", "org/also-imported", True, str(snap)),
+        ]
+
+    def test_pre_selects_imported_models(self):
+        choices = self._make_choices()
+        with mock.patch.object(
+            os, "get_terminal_size", return_value=types.SimpleNamespace(lines=50)
+        ), mock.patch.object(cli, "get_key", return_value="\r"):
+            selected = cli.select_models(choices)
+        selected_names = {c[1] for c in selected}
+        self.assertEqual(selected_names, {"org/imported", "org/also-imported"})
+        self.assertNotIn("org/not-imported", selected_names)
 
 
 class TestSelectDesired(unittest.TestCase):
