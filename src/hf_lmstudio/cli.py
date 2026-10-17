@@ -201,13 +201,11 @@ def discover_models(hub_dir):
                 print(f"Skipping {model_name}: snapshot no longer in cache")
                 continue
 
-            # Determine model type accurately using the helper function
+            # Determine model type accurately using the helper function.
+            # Models that cannot be classified are marked "Unknown" and
+            # included in the discovery list: the user decides whether to
+            # link them (clarification to SPEC §2.4).
             model_type = get_model_type(snapshot_path, model_name)
-
-            # Models that cannot be classified are reported and skipped (SPEC §2.4)
-            if model_type == "Unknown":
-                print(f"Skipping {model_name}: could not classify model type")
-                continue
 
             # Store model_type, model_name, and snapshot_path
             found_models.append((model_type, model_name, snapshot_path))

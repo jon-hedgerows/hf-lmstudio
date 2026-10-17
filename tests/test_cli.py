@@ -104,7 +104,7 @@ class TestDiscoverModels(unittest.TestCase):
         finally:
             bad.chmod(0o644)
 
-    def test_unclassifiable_model_skipped(self):
+    def test_unclassifiable_model_included(self):
         make_cache_entry(
             self.hub,
             "org/epsilon",
@@ -112,7 +112,9 @@ class TestDiscoverModels(unittest.TestCase):
             {"aaa": {"README.md": "hi"}},  # no .gguf, not mlx-community, no config
         )
         found = cli.discover_models(str(self.hub))
-        self.assertEqual(found, [], "unclassifiable models are skipped")
+        self.assertEqual(len(found), 1, "unclassifiable models are included")
+        self.assertEqual(found[0][0], "Unknown")
+        self.assertEqual(found[0][1], "org/epsilon")
 
     def test_missing_snapshot_skipped(self):
         make_cache_entry(

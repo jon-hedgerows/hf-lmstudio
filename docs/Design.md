@@ -30,7 +30,9 @@ The software follows a simple, procedural CLI architecture designed for interact
      2. Organisation check: repo ID starting with `mlx-community/` → `MLX`.
      3. Hub metadata via `huggingface_hub.HfApi().model_info()` (imported lazily at runtime, not a hard dependency): `library == "gguf"`/`mlx` or matching tags → `GGUF`/`MLX`.
      4. `config.json` `model_type` fallback (lowercased).
-     5. `Unknown` when nothing applies; such models are reported and skipped, never linked.
+     5. `Unknown` when nothing applies. Such models are included in the
+        discovery list and shown in the UI as "(unknown)"; the user decides
+        whether to link them (clarification to SPEC §2.4).
 
 4. **Interactive UI (`select_models`, `get_key`, `select_desired`)**:
    - A terminal-based selection menu (arrow keys to move, Space to toggle, Enter to confirm, Ctrl+C to cancel) using POSIX raw mode via `termios`/`tty`.

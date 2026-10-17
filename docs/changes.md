@@ -274,6 +274,13 @@ All steps are implemented and verified, each in its own commit on the
 | 10 | Complete partial links in `apply_desired_state` | §2.5, §2.6 | Done |
 | 11 | Update tests and final verification | §5, §2 | Done |
 
+**Unclassifiable models are included and user-selectable (clarification to SPEC §2.4):**
+- `discover_models()` no longer skips models classified as "Unknown". They
+  are included in the discovery list and shown in the UI as "(unknown)",
+  where the user can select or deselect them like any other model.
+- If selected, they are linked like any other model; if unselected, any
+  existing link is removed. Covered by `TestDiscoverModels.test_unclassifiable_model_included`.
+
 Verification performed:
 - `python -m unittest discover -s tests` → 32 tests pass.
 - Sandbox runs confirm: UI shows "already imported" only when fully and
