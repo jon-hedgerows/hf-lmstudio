@@ -44,7 +44,7 @@ Each discovered model is classified to decide where/how it may be linked:
 - **GGUF**: the snapshot directory contains a `.gguf` file.
 - **MLX**: the repository ID starts with `mlx-community/`.
 - Any other model falls back to reading `model_type` from `config.json`.
-- Models that cannot be classified are reported and skipped (not linked).
+- Models that cannot be classified are reported as unknown.
 
 ### 2.5 Linking behaviour
 
