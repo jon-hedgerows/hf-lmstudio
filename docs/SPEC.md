@@ -8,6 +8,8 @@ Living documentation for the project's intended behaviour, architecture, and dev
 
 By creating symbolic links, the tool lets LM Studio use models that were downloaded with `hf` or other Hub-compatible tools, without duplicating storage. This specification defines the project's intended behaviour, architecture, and development workflow.
 
+This plugin only supports macos and linux, Windows is not supported.
+
 ## 2. User-Facing Behaviour
 
 ### 2.1 Installation
@@ -42,7 +44,7 @@ Each discovered model is classified to decide where/how it may be linked:
 - **GGUF**: the snapshot directory contains a `.gguf` file.
 - **MLX**: the repository ID starts with `mlx-community/`.
 - Any other model falls back to reading `model_type` from `config.json`.
-- Models that cannot be classified are reported and skipped (not linked).
+- Models that cannot be classified are reported as unknown.
 
 ### 2.5 Linking behaviour
 
@@ -55,10 +57,18 @@ Each discovered model is classified to decide where/how it may be linked:
 
 Running `hf lmstudio` presents an interactive selector, and the user's selection defines the desired state for every discovered model:
 
+When initialising the list of models in the UI:
+
+- where a model is already fully and correctly symlinked in LM Studio, the model shows in the UI as **selected**
+- where a model is not found in LM Studio, or the symlinks are incomplete, the model shows in the UI as **unselected**
+
+The User can then select or deselect individual models.
+
 - **Selected** models must end up linked (symlinked) into LM Studio.
 - **Unselected** models must end up _not_ linked — any existing link for them is removed.
-- Dangling symlinks in the LM Studio models directory are removed if they point towards files in the HuggingFace cache. If this removal leaves a directory empty, then the directory is removed.
-- No existing files are ever modified; only symlinks are created or removed.
+- Dangling symlinks in the LM Studio models directory (links to models that are no longer in the hf cache) are removed if they point towards files in the HuggingFace cache. If this removal leaves a directory empty, then the directory is removed.
+- directories must not be removed unless they previously contained a symlink to the hf cache.
+- No existing _files_ are ever modified; existing symlinks may be updated, created, or removed; directory structures should be updated, created, or removed as required.
 
 The existing links are reported when discovered (models already imported are annotated as such).
 
@@ -71,6 +81,7 @@ The interactive selector renders a navigable menu (arrow keys to move, Space to 
 The implementation is a single procedural module, `src/hf_lmstudio/cli.py`, with the following responsibilities:
 
 - **CLI entry point** — argument parsing (`main()`), delegating to `manage_models()`.
+
 - **Model discovery** — enumerate Hub cache directories, resolve snapshot references, build the model list.
 - **Model classification** — `get_model_type()`, deciding MLX/GGUF/other.
 - **Interactive UI** — `select_models()` and `get_key()`, rendering the selection menu and defining the desired state.
@@ -88,11 +99,4 @@ The module is designed to run under `uvx` execution of the installed `hf` extens
 
 - Source lives in `src/hf_lmstudio/`; tests live in `tests/` (currently no tests are written — `tests/README.md` records this).
 - Build artefacts (`build/`, `dist/`, `*.egg-info/`, `__pycache__/`, `*.pyc`) and virtual environments (`.venv/`) are excluded from version control and should not be committed.
-- Documentation for the design intent previously covered in `Design.md` and `model_type_changes.md` is superseded by this specification; those files remain in the repository for historical context.
-
-## 6. Known Limitations / Future Work
-
-1. **`--all` is not implemented.** The CLI defines the flag but always falls back to interactive selection.
-2. **Model type accuracy.** Any model with a `config.json` is currently classified using `model_type` from that file, which misclassifies some models (e.g. CLIP architecture models are labelled MLX). See `model_type_changes.md` for the proposed approach (Hub API query by library/tags).
-3. **Symlink bookkeeping.** Links are currently reconciled against what exists on disk, rather than deriving the desired state from the user's selection alone — in particular, this does not yet remove links for models removed from the Hub cache.
-4. **Terminal handling.** Raw-mode key input relies on POSIX `termios`; Windows is unsupported.
+- Documentation for the design intent covered in `Design.md` is to be updated in line with the actual design in accordance with this specification. The design file remains in the repository as explanatory material.
