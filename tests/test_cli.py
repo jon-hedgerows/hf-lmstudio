@@ -57,10 +57,10 @@ class TestDiscoverModels(unittest.TestCase):
         )
         found = cli.discover_models(str(self.hub))
         self.assertEqual(len(found), 1)
-        mt, name, snap = found[0]
-        self.assertEqual(name, "org/alpha")
-        self.assertEqual(mt, "llama")
-        self.assertTrue(Path(snap).is_dir())
+        found_model = found[0]
+        self.assertEqual(found_model.model_name, "org/alpha")
+        self.assertEqual(found_model.model_type, cli.ModelFormat.OTHER)
+        self.assertTrue(Path(found_model.snapshot_path).is_dir())
 
     def test_multiple_refs_yield_single_entry(self):
         make_cache_entry(
@@ -128,6 +128,9 @@ class TestDiscoverModels(unittest.TestCase):
 
 
 class TestGetModelType(unittest.TestCase):
+    def tearDown(self):
+        cli._hf_api = None
+
     def test_gguf_local(self):
         snap = Path(tempfile.mkdtemp())
         (snap / "model.gguf").write_bytes(b"\x00" * 10)
@@ -142,7 +145,7 @@ class TestGetModelType(unittest.TestCase):
     def test_config_json_fallback(self):
         snap = Path(tempfile.mkdtemp())
         (snap / "config.json").write_text('{"model_type": "Llama"}')
-        self.assertEqual(cli.get_model_type(snap, "org/llama"), "llama")
+        self.assertEqual(cli.get_model_type(snap, "org/llama"), cli.ModelFormat.OTHER)
 
     def test_unknown_when_nothing_identifiable(self):
         snap = Path(tempfile.mkdtemp())
@@ -158,7 +161,7 @@ class TestGetModelType(unittest.TestCase):
         fake = types.ModuleType("huggingface_hub")
 
         class FakeInfo:
-            library = "gguf"
+            library_name = "gguf"
             tags = []
 
         class FakeHfApi:
@@ -172,6 +175,71 @@ class TestGetModelType(unittest.TestCase):
         finally:
             del sys.modules["huggingface_hub"]
 
+    def test_hub_api_library_name_only(self):
+        """library_name alone (no matching tag) still classifies as GGUF."""
+        snap = Path(tempfile.mkdtemp())
+        (snap / "config.json").write_text('{"model_type": "bert"}')
+        fake = types.ModuleType("huggingface_hub")
+
+        class FakeInfo:
+            library_name = "mlx"
+            tags = []
+
+        class FakeHfApi:
+            def model_info(self, repo_id):
+                return FakeInfo()
+
+        fake.HfApi = FakeHfApi
+        sys.modules["huggingface_hub"] = fake
+        try:
+            self.assertEqual(cli.get_model_type(snap, "org/whatever"), "MLX")
+        finally:
+            del sys.modules["huggingface_hub"]
+
+    def test_hub_api_error_logged_to_stderr(self):
+        snap = Path(tempfile.mkdtemp())
+        (snap / "config.json").write_text('{"model_type": "bert"}')
+        fake = types.ModuleType("huggingface_hub")
+
+        class Boom:
+            def model_info(self, repo_id):
+                raise RuntimeError("network down")
+
+        fake.HfApi = Boom
+        sys.modules["huggingface_hub"] = fake
+        try:
+            import io
+            captured = io.StringIO()
+            old_stderr = sys.stderr
+            sys.stderr = captured
+            try:
+                result = cli.get_model_type(snap, "org/x")
+            finally:
+                sys.stderr = old_stderr
+            self.assertEqual(result, cli.ModelFormat.OTHER)
+            self.assertIn("Warning", captured.getvalue())
+        finally:
+            del sys.modules["huggingface_hub"]
+
+    def test_nested_gguf_detected(self):
+        """GGUF in a subdirectory is detected (F4)."""
+        snap = Path(tempfile.mkdtemp())
+        sub = snap / "Q4_K_M"
+        sub.mkdir()
+        (sub / "model-00001-of-2.gguf").write_bytes(b"\x00" * 10)
+        self.assertEqual(cli.get_model_type(snap, "org/any"), "GGUF")
+
+    def test_case_insensitive_gguf_suffix(self):
+        snap = Path(tempfile.mkdtemp())
+        (snap / "model.GGUF").write_bytes(b"\x00" * 10)
+        self.assertEqual(cli.get_model_type(snap, "org/any"), "GGUF")
+
+    def test_non_string_model_type_guard(self):
+        """Non-string config.json model_type does not crash discovery (F5)."""
+        snap = Path(tempfile.mkdtemp())
+        (snap / "config.json").write_text('{"model_type": ["llama"]}')
+        self.assertEqual(cli.get_model_type(snap, "org/x"), "Unknown")
+
     def test_hub_api_error_falls_through(self):
         snap = Path(tempfile.mkdtemp())
         (snap / "config.json").write_text('{"model_type": "bert"}')
@@ -184,7 +252,7 @@ class TestGetModelType(unittest.TestCase):
         fake.HfApi = Boom
         sys.modules["huggingface_hub"] = fake
         try:
-            self.assertEqual(cli.get_model_type(snap, "org/x"), "bert")
+            self.assertEqual(cli.get_model_type(snap, "org/x"), cli.ModelFormat.OTHER)
         finally:
             del sys.modules["huggingface_hub"]
 
@@ -210,7 +278,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_link_selected(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         tgt = self.lm / "org/model-a"
         self.assertTrue(tgt.is_dir())
@@ -218,7 +286,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_unlink_unselected(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         # Pre-create a symlink (as if previously linked).
         tgt = self.lm / "org/model-a"
         tgt.parent.mkdir(parents=True, exist_ok=True)
@@ -228,7 +296,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_preserve_real_files_in_directory(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "user_file.txt").write_text("keep me")
@@ -238,7 +306,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_skip_real_file_at_target(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
         tgt.parent.mkdir(parents=True, exist_ok=True)
         tgt.write_text("real file")
@@ -248,7 +316,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_idempotent_relink(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         self.assertTrue((self.lm / "org/model-a" / "config.json").is_symlink())
@@ -358,7 +426,7 @@ class TestNoChangeOnConfirm(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         # Fully link the model first.
         cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
         tgt = self.lm / "org/model-a"
@@ -370,7 +438,7 @@ class TestNoChangeOnConfirm(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         # Fully link the model.
         cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
         tgt = self.lm / "org/model-a"
@@ -408,7 +476,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         # Pre-create only config.json symlink (partial link)
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
@@ -419,7 +487,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
 
     def test_replace_wrong_symlink(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "config.json").symlink_to("/tmp/wrong_target")
@@ -432,7 +500,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "config.json").symlink_to(snap / "config.json")
@@ -446,12 +514,11 @@ class TestSelectModels(unittest.TestCase):
     """select_models must pre-select already-imported models (SPEC §2.6)."""
 
     def _make_choices(self):
-        # model_choices entries: (display_name, model_name, is_imported, snapshot_path)
         snap = Path(tempfile.mkdtemp())
         return [
-            ("(llama) org/imported", "org/imported", True, str(snap)),
-            ("(llama) org/not-imported", "org/not-imported", False, str(snap)),
-            ("(llama) org/also-imported", "org/also-imported", True, str(snap)),
+            cli.ModelChoice("(llama) org/imported", "org/imported", True, str(snap)),
+            cli.ModelChoice("(llama) org/not-imported", "org/not-imported", False, str(snap)),
+            cli.ModelChoice("(llama) org/also-imported", "org/also-imported", True, str(snap)),
         ]
 
     def test_pre_selects_imported_models(self):
@@ -467,7 +534,10 @@ class TestSelectModels(unittest.TestCase):
 
 class TestSelectDesired(unittest.TestCase):
     def test_autolink_all_selects_every_model(self):
-        discovered = [("llama", "org/a", "/x"), ("MLX", "mlx-community/b", "/y")]
+        discovered = [
+            cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/a", "/x"),
+            cli.DiscoveredModel(cli.ModelFormat.MLX, "mlx-community/b", "/y"),
+        ]
         desired = cli.select_desired(discovered, autolink_all=True, lm_dir=Path("/tmp"))
         self.assertEqual(desired, {"org/a", "mlx-community/b"})
 

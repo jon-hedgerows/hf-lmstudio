@@ -1,24 +1,87 @@
 import json
 import os
+from enum import Enum
 from pathlib import Path
 import sys
-import glob
 import argparse
+from typing import NamedTuple
 
 # credit: much of this was written by Ivan Fioravanti
 
+# Terminal key sequences (R7: named constants instead of magic literals).
+KEY_UP = "\x1b[A"
+KEY_DOWN = "\x1b[B"
+KEY_ENTER = "\r"
+KEY_CTRL_C = "\x03"
 
-def select_models(model_choices):
+
+class ModelFormat(str, Enum):
+    """Model file format classification (SPEC §2.4).
+
+    Using str, Enum keeps values comparable to plain strings while giving
+    an explicit, documented set of formats.
+    """
+
+    GGUF = "GGUF"
+    MLX = "MLX"
+    OTHER = "Other"
+    UNKNOWN = "Unknown"
+
+
+# Shared HfApi client, created lazily and reused across models (F6).
+_hf_api: object | None = None
+
+
+def _get_hf_api():
+    """Return a shared HfApi client with a timeout, or None if unavailable."""
+    global _hf_api
+    if _hf_api is None:
+        try:
+            from huggingface_hub import HfApi
+
+            try:
+                _hf_api = HfApi(timeout=30)
+            except TypeError:
+                _hf_api = HfApi()
+        except ImportError:
+            _hf_api = None
+    return _hf_api
+
+
+class DiscoveredModel(NamedTuple):
+    """A model discovered in the Hugging Face cache (R1)."""
+
+    model_type: ModelFormat
+    model_name: str
+    snapshot_path: str
+
+
+class ModelChoice(NamedTuple):
+    """A model presented to the user in the interactive selector (R1)."""
+
+    display_name: str
+    model_name: str
+    is_imported: bool
+    snapshot_path: str
+
+
+def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
     # Pre-select models that are already imported (SPEC §2.6 clarification):
     # a fully and correctly symlinked model shows as selected in the UI.
-    selected = [bool(choice[2]) for choice in model_choices]
+    selected = [bool(choice.is_imported) for choice in model_choices]
     idx = 0
-    window_size = os.get_terminal_size().lines - 5
+    # R6: guard terminal size; fall back to a sensible default when no TTY
+    # or when the computed window would be non-positive.
+    try:
+        window_size = os.get_terminal_size().lines - 5
+    except OSError:
+        window_size = 20
+    window_size = max(window_size, 1)
 
     while True:
         print("\033[H\033[J", end="")
         print(
-            "❯ hf lmstudio - Hugging Face Model Link \nAvailable models (↑/↓ to navigate, SPACE to select, ENTER to confirm, Ctrl+C to quit):"
+            "❯ hf lmstudio - Hugging Face LM Studio Model Link \nAvailable models (↑/↓ to navigate, SPACE to select, ENTER to confirm, Ctrl+C to quit):"
         )
 
         window_start = max(
@@ -27,27 +90,25 @@ def select_models(model_choices):
         window_end = min(window_start + window_size, len(model_choices))
 
         for i in range(window_start, window_end):
-            display_name, _, _, _ = model_choices[i]
+            display_name = model_choices[i].display_name
             print(
                 f"{'>' if i == idx else ' '} {'◉' if selected[i] else '○'} {display_name}"
             )
 
         key = get_key()
-        if key == "\x1b[A":  # Up arrow
+        if key == KEY_UP:
             idx = max(0, idx - 1)
-        elif key == "\x1b[B":  # Down arrow
+        elif key == KEY_DOWN:
             idx = min(len(model_choices) - 1, idx + 1)
         elif key == " ":
             selected[idx] = not selected[idx]
-        elif key == "\r":  # Enter key
+        elif key == KEY_ENTER:
             break
-        elif key == "\x03":  # Ctrl+C
+        elif key == KEY_CTRL_C:
             print("\nImport is cancelled. Do nothing.")
             sys.exit(0)
 
-    return [
-        choice for choice, is_selected in zip(model_choices, selected) if is_selected
-    ]
+    return [choice for choice, is_selected in zip(model_choices, selected) if is_selected]
 
 
 def get_key():
@@ -66,60 +127,76 @@ def get_key():
     return ch
 
 
-def get_model_type(snapshot_path, repo_id):
-    """Classify a model as GGUF, MLX, or another type (SPEC §2.4).
+def get_model_type(snapshot_path: str | Path, repo_id: str) -> ModelFormat:
+    """Classify a model's file format (SPEC §2.4).
 
     Tiers, in order: local GGUF check, mlx-community organisation check,
     Hub metadata (library/tags) via huggingface_hub, config.json model_type
-    fallback. Returns "Unknown" when nothing applies; callers skip those
-    models (SPEC §2.4).
+    fallback. Returns ModelFormat.UNKNOWN when nothing applies; such models
+    are included in the discovery list for user selection (clarification to
+    SPEC §2.4).
     """
-    snapshot_path = Path(snapshot_path)
-    if not snapshot_path.is_dir():
-        return "Unknown"
+    path = Path(snapshot_path)
+    if not path.is_dir():
+        return ModelFormat.UNKNOWN
 
-    # 1. Local GGUF check.
-    if any(item.suffix == ".gguf" for item in snapshot_path.iterdir()):
-        return "GGUF"
+    # 1. Local GGUF check (recursive: snapshots preserve subdirectories,
+    #    and GGUF repos commonly place files in per-quantisation folders).
+    if any(
+        p.is_file() and p.suffix.lower() == ".gguf"
+        for p in path.rglob("*")
+    ):
+        return ModelFormat.GGUF
 
-    # 2. Organisation check.
-    if repo_id.startswith("mlx-community/"):
-        return "MLX"
+    # 2. Organisation check (case-insensitive).
+    if repo_id.lower().startswith("mlx-community/"):
+        return ModelFormat.MLX
 
     # 3. Hub metadata (huggingface_hub is provided by the `hf` runtime, not a
-    #    hard dependency -- imported lazily, SPEC §4).
+    #    hard dependency -- imported lazily, SPEC §4). A shared client is
+    #    reused across models with a timeout; HF_HUB_OFFLINE short-circuits
+    #    the call entirely (F6).
     try:
-        from huggingface_hub import HfApi
+        from huggingface_hub.errors import HfHubHTTPError
+    except ImportError:
+        HfHubHTTPError = Exception
 
-        info = HfApi().model_info(repo_id)
-        library = getattr(info, "library", None) or ""
-        tags = getattr(info, "tags", None) or []
-        tag_set = {str(t).lower() for t in tags}
-        if library.lower() == "gguf" or "gguf" in tag_set:
-            return "GGUF"
-        if library.lower() == "mlx" or "mlx" in tag_set:
-            return "MLX"
-    except Exception:
-        # ImportError, network error, private model, etc.: fall through.
-        pass
+    api = _get_hf_api()
+    if api is not None and not os.environ.get("HF_HUB_OFFLINE"):
+        try:
+            info = api.model_info(repo_id)
+            library = (getattr(info, "library_name", None) or "").lower()
+            tags = {str(t).lower() for t in (getattr(info, "tags", None) or [])}
+            if library == "gguf" or "gguf" in tags or getattr(info, "gguf", None):
+                return ModelFormat.GGUF
+            if library == "mlx" or "mlx" in tags:
+                return ModelFormat.MLX
+        except HfHubHTTPError as exc:
+            print(
+                f"Warning: Hub lookup failed for {repo_id}: {exc}", file=sys.stderr
+            )
+        except (OSError, TimeoutError) as exc:
+            print(
+                f"Warning: network error for {repo_id}: {exc}", file=sys.stderr
+            )
 
-    # 4. config.json fallback.
-    config_path = snapshot_path / "config.json"
+    # 4. config.json fallback: any present model_type means "Other"
+    #    (architecture is not part of the format contract).
+    config_path = path / "config.json"
     if config_path.exists():
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            model_type = config.get("model_type", "").lower()
-            if model_type:
-                return model_type
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            value = config.get("model_type")
+            if isinstance(value, str) and value:
+                return ModelFormat.OTHER
         except (json.JSONDecodeError, OSError):
             pass
 
     # 5. Could not classify.
-    return "Unknown"
+    return ModelFormat.UNKNOWN
 
 
-def manage_models(autolink_all: bool = False):
+def manage_models(autolink_all: bool = False) -> None:
     """Import models from the Hugging Face cache."""
     # the hub dir is set by $HF_HUB_CACHE if defined, or $HF_HOME/hub if defined, or ~/.cache/huggingface/hub
     hub_dir = Path(
@@ -133,12 +210,15 @@ def manage_models(autolink_all: bool = False):
     )
     # the lm studio models dir is defined in settings.json, or is ~/.lmstudio/models
     try:
-        with open(
-            Path(os.path.expanduser("~/.lmstudio/settings.json"))
-        ) as settings_file:
+        settings_path = Path(os.path.expanduser("~/.lmstudio/settings.json"))
+        with open(settings_path) as settings_file:
             settings = json.load(settings_file)
-            lm_studio_dir = Path(settings["downloadsFolder"])
-    except (json.JSONDecodeError, FileNotFoundError):
+        downloads_folder = settings.get("downloadsFolder")
+        if downloads_folder:
+            lm_studio_dir = Path(downloads_folder)
+        else:
+            lm_studio_dir = Path(os.path.expanduser("~/.lmstudio/models"))
+    except (json.JSONDecodeError, FileNotFoundError, KeyError, OSError):
         # if there's an error while reading the models dir, set it to the default
         lm_studio_dir = Path(os.path.expanduser("~/.lmstudio/models"))
 
@@ -156,34 +236,35 @@ def manage_models(autolink_all: bool = False):
     cleanup_dangling_links(lm_studio_dir, hub_dir)
 
 
-def discover_models(hub_dir):
+def discover_models(hub_dir: str | Path) -> list[DiscoveredModel]:
     """Discover and classify models in the Hugging Face Hub cache.
 
-    Returns a list of (model_type, model_name, snapshot_path) tuples for
-    classifiable models. Unclassifiable models are reported and skipped
-    (SPEC §2.4); discovery never crashes on unusual cache layout (SPEC §2.3).
+    Returns a list of DiscoveredModel records. Unclassifiable models are
+    labelled ModelFormat.UNKNOWN and included so the user can decide whether
+    to link them (clarification to SPEC §2.4); discovery never crashes on
+    unusual cache layout (SPEC §2.3).
     """
-    found_models = []
-    seen_models = set()
-    for model_dir in glob.glob(os.path.join(hub_dir, "models--*")):
-        refs_dir = Path(os.path.join(model_dir, "refs"))
-        snapshots_dir = Path(os.path.join(model_dir, "snapshots"))
+    found_models: list[DiscoveredModel] = []
+    seen_models: set[str] = set()
+    hub_path = Path(hub_dir)
+    for model_dir in hub_path.glob("models--*"):
+        refs_dir = model_dir / "refs"
+        snapshots_dir = model_dir / "snapshots"
         if not refs_dir.exists():
             continue
 
-        # and get the model name
-        parts = model_dir.split("--")
-        model_name = "/".join(parts[1:])
+        # R4: derive repo id from the final path component only.
+        model_name = model_dir.name.removeprefix("models--").replace("--", "/")
 
         # Dedupe discovered models by model name: first snapshot wins.
         if model_name in seen_models:
             continue
 
         # Search for refs
-        for ref_file in glob.glob(os.path.join(refs_dir, "*")):
+        for ref_file in refs_dir.glob("*"):
             # Skip directory entries in refs/ (e.g. refs/refs/pr/1)
             # described in docs/huggingface-cache.md (SPEC §2.3).
-            if not Path(ref_file).is_file():
+            if not ref_file.is_file():
                 continue
             try:
                 with open(ref_file, "r", encoding="utf-8") as f:
@@ -193,28 +274,25 @@ def discover_models(hub_dir):
                 print(f"Skipping {model_name}: could not read ref {ref_file}")
                 continue
             # now have a snapshot reference, determine the snapshot path
-            snapshot_path = os.path.join(snapshots_dir, ref)
-            if not Path(snapshot_path).is_dir():
+            snapshot_path = snapshots_dir / ref
+            if not snapshot_path.is_dir():
                 # Snapshot no longer in the cache (model removed). Skip it from
                 # discovery so any existing link is left for
-                # cleanup_dangling_links to remove (SPEC §6.3).
+                # cleanup_dangling_links to remove.
                 print(f"Skipping {model_name}: snapshot no longer in cache")
                 continue
 
             # Determine model type accurately using the helper function.
-            # Models that cannot be classified are marked "Unknown" and
-            # included in the discovery list: the user decides whether to
-            # link them (clarification to SPEC §2.4).
             model_type = get_model_type(snapshot_path, model_name)
 
             # Store model_type, model_name, and snapshot_path
-            found_models.append((model_type, model_name, snapshot_path))
+            found_models.append(DiscoveredModel(model_type, model_name, snapshot_path))
             seen_models.add(model_name)
             break
     return found_models
 
 
-def is_fully_linked(lm_dir, model_name, snapshot_path):
+def is_fully_linked(lm_dir: str | Path, model_name: str, snapshot_path: str | Path) -> bool:
     """Return True if every file in ``snapshot_path`` is present as a correct
     symlink in ``lm_dir/model_name`` (SPEC §2.6 UI initialization).
 
@@ -240,7 +318,11 @@ def is_fully_linked(lm_dir, model_name, snapshot_path):
     return True
 
 
-def select_desired(models, autolink_all, lm_dir):
+def select_desired(
+    models: list[DiscoveredModel],
+    autolink_all: bool,
+    lm_dir: str | Path,
+) -> set[str]:
     """Return the set of model names the user wants linked (desired state).
 
     With --all, every classifiable model is selected without a terminal
@@ -253,22 +335,26 @@ def select_desired(models, autolink_all, lm_dir):
     or when the symlinks are incomplete.
     """
     if autolink_all:
-        return {model_name for _, model_name, _ in models}
+        return {model.model_name for model in models}
 
-    model_choices = []
-    for model_type, model_name, snapshot_path in sorted(
-        models, key=lambda elem: elem[1].lower()
-    ):
-        is_imported = is_fully_linked(lm_dir, model_name, snapshot_path)
+    model_choices: list[ModelChoice] = []
+    for model in sorted(models, key=lambda m: m.model_name.lower()):
+        is_imported = is_fully_linked(lm_dir, model.model_name, model.snapshot_path)
         status = " (already imported)" if is_imported else ""
-        display_name = f"({model_type}) {model_name}{status}"
-        model_choices.append((display_name, model_name, is_imported, snapshot_path))
+        display_name = f"({model.model_type.value}) {model.model_name}{status}"
+        model_choices.append(
+            ModelChoice(display_name, model.model_name, is_imported, model.snapshot_path)
+        )
 
     selected = select_models(model_choices)
-    return {model_name for _, model_name, _, _ in selected}
+    return {choice.model_name for choice in selected}
 
 
-def apply_desired_state(lm_dir, discovered, desired):
+def apply_desired_state(
+    lm_dir: str | Path,
+    discovered: list[tuple[ModelFormat, str, str]],
+    desired: set[str],
+) -> None:
     """Make the LM Studio dir match the desired state (SPEC §2.5, §2.6).
 
     Selected models are linked as a directory of symlinks into the HF cache;
@@ -276,12 +362,18 @@ def apply_desired_state(lm_dir, discovered, desired):
     directories that the user created are never modified or deleted; only
     symlinks we created are created or removed.
     """
-    for _, model_name, snapshot_path in discovered:
+    for model in discovered:
+        model_name = model.model_name
+        snapshot_path = model.snapshot_path
         target_path = lm_dir / model_name
         if model_name in desired:
             # Selected: ensure every snapshot file is symlinked into the
             # target directory. Never modify or delete real user files.
-            if target_path.exists() and not target_path.is_dir() and not target_path.is_symlink():
+            if (
+                target_path.exists()
+                and not target_path.is_dir()
+                and not target_path.is_symlink()
+            ):
                 # Real file at the link target: never touch it.
                 print(f"Skipping {model_name}: real file at link target")
                 continue
@@ -327,9 +419,9 @@ def apply_desired_state(lm_dir, discovered, desired):
                     print(f"Unlinked {model_name}: user files kept, directory remains")
 
 
-def cleanup_dangling_links(lm_dir, hub_dir):
+def cleanup_dangling_links(lm_dir: str | Path, hub_dir: str | Path) -> None:
     """Remove dangling symlinks that point into the HF cache, then prune
-    now-empty directories (SPEC §2.6, §6.3).
+    now-empty directories (SPEC §2.6).
 
     This also removes links for models that have been removed from the Hub
     cache: once the snapshot disappears, those symlinks dangle and are
@@ -369,8 +461,8 @@ def cleanup_dangling_links(lm_dir, hub_dir):
             pass
 
 
-def main():
-    """Entry point for uvx execution"""
+def main() -> None:
+    """Entry point for uvx execution."""
     parser = argparse.ArgumentParser(
         prog="hf lmstudio",
         description="Link models in the hf cache to the LM Studio/Bionic downloads folder.",

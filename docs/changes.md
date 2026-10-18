@@ -12,7 +12,7 @@ This document plans the changes needed to bring `src/hf_lmstudio/cli.py` into co
 - **Runtime dependency rule (SPEC §4):** standard library only at install time. `huggingface_hub` is provided by the `hf` command under `uvx`, so it may be imported _lazily_ inside functions (wrapped in `try/except ImportError`), but `pyproject.toml` must not gain a hard dependency.
 - **Safety rule (SPEC §2.5–2.6):** never modify or delete existing user files. Only symlinks may be created or removed. Real directories/files at link targets are left untouched and reported.
 - `Design.md` and `model_type_changes.md` remain for historical context per SPEC §5.
-- Known limitations in SPEC §6 addressed by this plan: 1 (`--all`), 2 (model type accuracy), 3 (symlink bookkeeping / links for cache-removed models). Limitation 4 (POSIX terminal, Windows unsupported) remains documented; no change.
+- Known limitations addressed by this plan: 1 (`--all`), 2 (model type accuracy), 3 (symlink bookkeeping / links for cache-removed models). Limitation 4 (POSIX terminal, Windows unsupported) remains documented; no change.
 
 ## Gap summary (SPEC vs current code)
 
@@ -23,8 +23,8 @@ This document plans the changes needed to bring `src/hf_lmstudio/cli.py` into co
 | §2.5 Relink replaces       | Replace existing dir/symlink                                        | `os.symlink` crashes if target exists; `shutil.rmtree` deletes real directories                                 | Crash risk; deletes user data |
 | §2.4 Skip unknown          | Report and skip unclassifiable models                               | `Unknown` models are added and linked                                                                           | Not skipped                   |
 | §2.6 Dangling links        | Remove dangling symlinks → HF cache; remove empty dirs              | Not done                                                                                                        | Missing                       |
-| §2.4 / §6.2 Classification | GGUF / MLX / other via config fallback; Hub API more accurate       | `config.json` `model_type` only; CLIP mislabelled                                                               | Inaccurate                    |
-| §6.3 Bookkeeping           | Desired state from selection; remove links for cache-removed models | Reconciled against disk only                                                                                    | Missing                       |
+| §2.4 Classification        | GGUF / MLX / other via config fallback; Hub API more accurate       | `config.json` `model_type` only; CLIP mislabelled                                                               | Inaccurate                    |
+| §2.6 Bookkeeping           | Desired state from selection; remove links for cache-removed models | Reconciled against disk only                                                                                    | Missing                       |
 | §2.3 Discovery             | `models--*`, `refs` → `snapshots`                                   | `refs/` subdirectories crash `open()`                                                                           | Fragile                       |
 | §5 Tests                   | Tests in `tests/`                                                   | None                                                                                                            | Missing                       |
 
@@ -82,7 +82,7 @@ This document plans the changes needed to bring `src/hf_lmstudio/cli.py` into co
 - Sandbox cache + LM Studio dir. Run reconciliation with a fixed desired set (bypass the menu via the refactored function).
 - Confirm: selected models → directory of symlinks; unselected but previously linked → symlink removed; unselected and never linked → nothing; real directory pre-existing at a target → untouched; running twice with the same selection → no `FileExistsError`, idempotent.
 
-## Step 4 — Implement `--all` (SPEC §2.2, §6.1)
+## Step 4 — Implement `--all` (SPEC §2.2)
 
 **Goal:** `hf lmstudio --all` links every compatible model without interactive selection and never crashes.
 
@@ -97,7 +97,7 @@ This document plans the changes needed to bring `src/hf_lmstudio/cli.py` into co
 - Temp cache with ≥2 classifiable models. Run `python -m hf_lmstudio --all` (or `manage_models(autolink_all=True)`) with no TTY.
 - Confirm: all models linked, no interactive prompts, no crash; second run is idempotent.
 
-## Step 5 — Dangling-symlink and empty-directory cleanup (SPEC §2.6, §6.3)
+## Step 5 — Dangling-symlink and empty-directory cleanup (SPEC §2.6)
 
 **Goal:** After reconciliation, dangling symlinks in the LM Studio dir that point into the HF cache are removed; empty directories left behind are removed. This covers links for models removed from the cache (their snapshots no longer exist → dangling).
 
@@ -113,7 +113,7 @@ This document plans the changes needed to bring `src/hf_lmstudio/cli.py` into co
 - Pre-create in the LM Studio dir: (a) a dangling symlink pointing into the HF cache, (b) an empty subdirectory, (c) a valid symlink and a real file as controls.
 - Run the tool; confirm (a) and (b) removed, (c) untouched.
 
-## Step 6 — Model type accuracy via Hub API (SPEC §2.4, §6.2)
+## Step 6 — Model type accuracy via Hub API (SPEC §2.4)
 
 **Goal:** Classification uses local checks first, then Hub metadata (library/tags), then `config.json` fallback — reducing misclassification (e.g. CLIP no longer labelled MLX).
 
@@ -178,7 +178,7 @@ does not yet meet:
   created, or removed; directory structures should be updated, created, or
   removed as required.
 
-The §6 "Known Limitations / Future Work" section was removed, so `--all`,
+The "Known Limitations / Future Work" section was removed, so `--all`,
 model-type accuracy, and symlink bookkeeping are now expected behaviour, not
 limitations.
 
@@ -265,9 +265,9 @@ All steps are implemented and verified, each in its own commit on the
 | 1 | Skip unclassifiable models | §2.4 | Done |
 | 2 | Harden model discovery | §2.3 | Done |
 | 3 | Desired-state reconciliation | §2.5, §2.6 | Done |
-| 4 | Implement `--all` | §2.2, §6.1 | Done |
-| 5 | Dangling-symlink / empty-dir cleanup | §2.6, §6.3 | Done |
-| 6 | Model type accuracy via Hub API | §2.4, §6.2 | Done |
+| 4 | Implement `--all` | §2.2 | Done |
+| 5 | Dangling-symlink / empty-dir cleanup | §2.6 | Done |
+| 6 | Model type accuracy via Hub API | §2.4 | Done |
 | 7 | Tests (stdlib `unittest`) | §5 | Done |
 | 8 | End-to-end verification | §2 | Done |
 | 9 | Fix UI initialization: "fully and correctly symlinked" | §2.6 | Done |
