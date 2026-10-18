@@ -57,10 +57,10 @@ class TestDiscoverModels(unittest.TestCase):
         )
         found = cli.discover_models(str(self.hub))
         self.assertEqual(len(found), 1)
-        mt, name, snap = found[0]
-        self.assertEqual(name, "org/alpha")
-        self.assertEqual(mt, cli.ModelFormat.OTHER)
-        self.assertTrue(Path(snap).is_dir())
+        found_model = found[0]
+        self.assertEqual(found_model.model_name, "org/alpha")
+        self.assertEqual(found_model.model_type, cli.ModelFormat.OTHER)
+        self.assertTrue(Path(found_model.snapshot_path).is_dir())
 
     def test_multiple_refs_yield_single_entry(self):
         make_cache_entry(
@@ -278,7 +278,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_link_selected(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         tgt = self.lm / "org/model-a"
         self.assertTrue(tgt.is_dir())
@@ -286,7 +286,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_unlink_unselected(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         # Pre-create a symlink (as if previously linked).
         tgt = self.lm / "org/model-a"
         tgt.parent.mkdir(parents=True, exist_ok=True)
@@ -296,7 +296,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_preserve_real_files_in_directory(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "user_file.txt").write_text("keep me")
@@ -306,7 +306,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_skip_real_file_at_target(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
         tgt.parent.mkdir(parents=True, exist_ok=True)
         tgt.write_text("real file")
@@ -316,7 +316,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_idempotent_relink(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         self.assertTrue((self.lm / "org/model-a" / "config.json").is_symlink())
@@ -426,7 +426,7 @@ class TestNoChangeOnConfirm(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         # Fully link the model first.
         cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
         tgt = self.lm / "org/model-a"
@@ -438,7 +438,7 @@ class TestNoChangeOnConfirm(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         # Fully link the model.
         cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
         tgt = self.lm / "org/model-a"
@@ -476,7 +476,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         # Pre-create only config.json symlink (partial link)
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
@@ -487,7 +487,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
 
     def test_replace_wrong_symlink(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "config.json").symlink_to("/tmp/wrong_target")
@@ -500,7 +500,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [("llama", "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "config.json").symlink_to(snap / "config.json")
@@ -514,12 +514,11 @@ class TestSelectModels(unittest.TestCase):
     """select_models must pre-select already-imported models (SPEC §2.6)."""
 
     def _make_choices(self):
-        # model_choices entries: (display_name, model_name, is_imported, snapshot_path)
         snap = Path(tempfile.mkdtemp())
         return [
-            ("(llama) org/imported", "org/imported", True, str(snap)),
-            ("(llama) org/not-imported", "org/not-imported", False, str(snap)),
-            ("(llama) org/also-imported", "org/also-imported", True, str(snap)),
+            cli.ModelChoice("(llama) org/imported", "org/imported", True, str(snap)),
+            cli.ModelChoice("(llama) org/not-imported", "org/not-imported", False, str(snap)),
+            cli.ModelChoice("(llama) org/also-imported", "org/also-imported", True, str(snap)),
         ]
 
     def test_pre_selects_imported_models(self):
@@ -535,7 +534,10 @@ class TestSelectModels(unittest.TestCase):
 
 class TestSelectDesired(unittest.TestCase):
     def test_autolink_all_selects_every_model(self):
-        discovered = [("llama", "org/a", "/x"), ("MLX", "mlx-community/b", "/y")]
+        discovered = [
+            cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/a", "/x"),
+            cli.DiscoveredModel(cli.ModelFormat.MLX, "mlx-community/b", "/y"),
+        ]
         desired = cli.select_desired(discovered, autolink_all=True, lm_dir=Path("/tmp"))
         self.assertEqual(desired, {"org/a", "mlx-community/b"})
 

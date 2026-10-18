@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import glob
 import argparse
+from typing import NamedTuple
 
 # credit: much of this was written by Ivan Fioravanti
 
@@ -42,10 +43,27 @@ def _get_hf_api():
     return _hf_api
 
 
-def select_models(model_choices):
+class DiscoveredModel(NamedTuple):
+    """A model discovered in the Hugging Face cache (R1)."""
+
+    model_type: ModelFormat
+    model_name: str
+    snapshot_path: str
+
+
+class ModelChoice(NamedTuple):
+    """A model presented to the user in the interactive selector (R1)."""
+
+    display_name: str
+    model_name: str
+    is_imported: bool
+    snapshot_path: str
+
+
+def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
     # Pre-select models that are already imported (SPEC §2.6 clarification):
     # a fully and correctly symlinked model shows as selected in the UI.
-    selected = [bool(choice[2]) for choice in model_choices]
+    selected = [bool(choice.is_imported) for choice in model_choices]
     idx = 0
     window_size = os.get_terminal_size().lines - 5
 
@@ -61,7 +79,7 @@ def select_models(model_choices):
         window_end = min(window_start + window_size, len(model_choices))
 
         for i in range(window_start, window_end):
-            display_name, _, _, _ = model_choices[i]
+            display_name = model_choices[i].display_name
             print(
                 f"{'>' if i == idx else ' '} {'◉' if selected[i] else '○'} {display_name}"
             )
@@ -79,9 +97,7 @@ def select_models(model_choices):
             print("\nImport is cancelled. Do nothing.")
             sys.exit(0)
 
-    return [
-        choice for choice, is_selected in zip(model_choices, selected) if is_selected
-    ]
+    return [choice for choice, is_selected in zip(model_choices, selected) if is_selected]
 
 
 def get_key():
@@ -206,15 +222,15 @@ def manage_models(autolink_all: bool = False) -> None:
     cleanup_dangling_links(lm_studio_dir, hub_dir)
 
 
-def discover_models(hub_dir: str | Path) -> list[tuple[ModelFormat, str, str]]:
+def discover_models(hub_dir: str | Path) -> list[DiscoveredModel]:
     """Discover and classify models in the Hugging Face Hub cache.
 
-    Returns a list of (model_type, model_name, snapshot_path) tuples.
-    Unclassifiable models are labelled ModelFormat.UNKNOWN and included so
-    the user can decide whether to link them (clarification to SPEC §2.4);
-    discovery never crashes on unusual cache layout (SPEC §2.3).
+    Returns a list of DiscoveredModel records. Unclassifiable models are
+    labelled ModelFormat.UNKNOWN and included so the user can decide whether
+    to link them (clarification to SPEC §2.4); discovery never crashes on
+    unusual cache layout (SPEC §2.3).
     """
-    found_models: list[tuple[ModelFormat, str, str]] = []
+    found_models: list[DiscoveredModel] = []
     seen_models: set[str] = set()
     for model_dir in glob.glob(os.path.join(hub_dir, "models--*")):
         refs_dir = Path(os.path.join(model_dir, "refs"))
@@ -256,7 +272,7 @@ def discover_models(hub_dir: str | Path) -> list[tuple[ModelFormat, str, str]]:
             model_type = get_model_type(snapshot_path, model_name)
 
             # Store model_type, model_name, and snapshot_path
-            found_models.append((model_type, model_name, snapshot_path))
+            found_models.append(DiscoveredModel(model_type, model_name, snapshot_path))
             seen_models.add(model_name)
             break
     return found_models
@@ -289,7 +305,7 @@ def is_fully_linked(lm_dir: str | Path, model_name: str, snapshot_path: str | Pa
 
 
 def select_desired(
-    models: list[tuple[ModelFormat, str, str]],
+    models: list[DiscoveredModel],
     autolink_all: bool,
     lm_dir: str | Path,
 ) -> set[str]:
@@ -305,19 +321,19 @@ def select_desired(
     or when the symlinks are incomplete.
     """
     if autolink_all:
-        return {model_name for _, model_name, _ in models}
+        return {model.model_name for model in models}
 
-    model_choices: list[tuple[str, str, bool, str]] = []
-    for model_type, model_name, snapshot_path in sorted(
-        models, key=lambda elem: elem[1].lower()
-    ):
-        is_imported = is_fully_linked(lm_dir, model_name, snapshot_path)
+    model_choices: list[ModelChoice] = []
+    for model in sorted(models, key=lambda m: m.model_name.lower()):
+        is_imported = is_fully_linked(lm_dir, model.model_name, model.snapshot_path)
         status = " (already imported)" if is_imported else ""
-        display_name = f"({model_type.value}) {model_name}{status}"
-        model_choices.append((display_name, model_name, is_imported, snapshot_path))
+        display_name = f"({model.model_type.value}) {model.model_name}{status}"
+        model_choices.append(
+            ModelChoice(display_name, model.model_name, is_imported, model.snapshot_path)
+        )
 
     selected = select_models(model_choices)
-    return {model_name for _, model_name, _, _ in selected}
+    return {choice.model_name for choice in selected}
 
 
 def apply_desired_state(
@@ -332,7 +348,9 @@ def apply_desired_state(
     directories that the user created are never modified or deleted; only
     symlinks we created are created or removed.
     """
-    for _, model_name, snapshot_path in discovered:
+    for model in discovered:
+        model_name = model.model_name
+        snapshot_path = model.snapshot_path
         target_path = lm_dir / model_name
         if model_name in desired:
             # Selected: ensure every snapshot file is symlinked into the
