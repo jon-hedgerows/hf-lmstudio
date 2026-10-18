@@ -44,8 +44,10 @@ Each discovered model is classified to decide where/how it may be linked:
 - **GGUF**: the snapshot directory contains a `.gguf` file (searched recursively).
 - **MLX**: the repository ID starts with `mlx-community/`.
 - Hub metadata: queried via `huggingface_hub` `HfApi().model_info()`; `library_name` or tags containing `"gguf"`/`"mlx"` are used as additional signals. The call is skipped when `HF_HUB_OFFLINE` is set or the Hub is unreachable.
-- Any other model falls back to reading `model_type` from `config.json`.
+- Any other model falls back to reading `model_type` from `config.json`; a present `model_type` classifies the model as **Other**.
 - Models that cannot be classified are reported as `"unknown"` and included in discovery for the user to decide whether to link.
+
+The classification is a **format label** (GGUF / MLX / Other / unknown). All discovered models are listed in the interactive selector and may be linked by the user; the label is informational and does not by itself restrict linking.
 
 ### 2.5 Linking behaviour
 

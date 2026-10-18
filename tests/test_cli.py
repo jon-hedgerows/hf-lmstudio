@@ -4,7 +4,8 @@ These exercise the separable pieces of `manage_models` without needing a
 terminal or the real Hugging Face cache / LM Studio directories.
 """
 
-import json
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -15,7 +16,40 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import hf_lmstudio.cli as cli  # noqa: E402
+from hf_lmstudio import cli  # noqa: E402
+
+
+def setUpModule():
+    """Keep every test offline by default: no real Hub calls (N3)."""
+    global _get_hf_api_patcher
+    _get_hf_api_patcher = mock.patch.object(cli, "_get_hf_api", return_value=None)
+    _get_hf_api_patcher.start()
+
+
+def tearDownModule():
+    _get_hf_api_patcher.stop()
+
+
+class FakeInfo:
+    """Minimal stand-in for huggingface_hub's ModelInfo."""
+
+    def __init__(self, library_name=None, tags=None, gguf=None):
+        self.library_name = library_name
+        self.tags = tags or []
+        self.gguf = gguf
+
+
+class FakeApi:
+    """Stand-in for HfApi: returns a FakeInfo or raises a chosen exception."""
+
+    def __init__(self, info=None, exc=None):
+        self._info = info
+        self._exc = exc
+
+    def model_info(self, repo_id, timeout=None):
+        if self._exc is not None:
+            raise self._exc
+        return self._info
 
 
 def make_cache_entry(hub, repo_id, refs, snapshots):
@@ -128,9 +162,6 @@ class TestDiscoverModels(unittest.TestCase):
 
 
 class TestGetModelType(unittest.TestCase):
-    def tearDown(self):
-        cli._hf_api = None
-
     def test_gguf_local(self):
         snap = Path(tempfile.mkdtemp())
         (snap / "model.gguf").write_bytes(b"\x00" * 10)
@@ -158,68 +189,58 @@ class TestGetModelType(unittest.TestCase):
     def test_hub_api_overrides_misleading_config(self):
         snap = Path(tempfile.mkdtemp())
         (snap / "config.json").write_text('{"model_type": "llama"}')
-        fake = types.ModuleType("huggingface_hub")
-
-        class FakeInfo:
-            library_name = "gguf"
-            tags = []
-
-        class FakeHfApi:
-            def model_info(self, repo_id):
-                return FakeInfo()
-
-        fake.HfApi = FakeHfApi
-        sys.modules["huggingface_hub"] = fake
-        try:
+        api = FakeApi(info=FakeInfo(library_name="gguf", tags=[]))
+        with mock.patch.object(cli, "_get_hf_api", return_value=api):
             self.assertEqual(cli.get_model_type(snap, "org/whatever"), "GGUF")
-        finally:
-            del sys.modules["huggingface_hub"]
 
     def test_hub_api_library_name_only(self):
-        """library_name alone (no matching tag) still classifies as GGUF."""
+        """library_name alone (no matching tag) still classifies as MLX."""
         snap = Path(tempfile.mkdtemp())
         (snap / "config.json").write_text('{"model_type": "bert"}')
-        fake = types.ModuleType("huggingface_hub")
-
-        class FakeInfo:
-            library_name = "mlx"
-            tags = []
-
-        class FakeHfApi:
-            def model_info(self, repo_id):
-                return FakeInfo()
-
-        fake.HfApi = FakeHfApi
-        sys.modules["huggingface_hub"] = fake
-        try:
+        api = FakeApi(info=FakeInfo(library_name="mlx", tags=[]))
+        with mock.patch.object(cli, "_get_hf_api", return_value=api):
             self.assertEqual(cli.get_model_type(snap, "org/whatever"), "MLX")
-        finally:
-            del sys.modules["huggingface_hub"]
 
-    def test_hub_api_error_logged_to_stderr(self):
+    def test_hub_api_gguf_attribute(self):
+        """A populated info.gguf attribute is a GGUF signal."""
+        snap = Path(tempfile.mkdtemp())
+        (snap / "README.md").write_text("hi")
+        api = FakeApi(info=FakeInfo(gguf={"architecture": "llama"}))
+        with mock.patch.object(cli, "_get_hf_api", return_value=api):
+            self.assertEqual(cli.get_model_type(snap, "org/whatever"), "GGUF")
+
+    def test_hub_api_unexpected_error_logged(self):
+        """An unexpected error falls through and is surfaced, not silent (N1)."""
         snap = Path(tempfile.mkdtemp())
         (snap / "config.json").write_text('{"model_type": "bert"}')
-        fake = types.ModuleType("huggingface_hub")
+        api = FakeApi(exc=RuntimeError("unexpected bug"))
+        stderr = io.StringIO()
+        with mock.patch.object(cli, "_get_hf_api", return_value=api), \
+                contextlib.redirect_stderr(stderr):
+            result = cli.get_model_type(snap, "org/x")
+        self.assertEqual(result, cli.ModelFormat.OTHER)
+        self.assertIn("Unexpected error", stderr.getvalue())
 
-        class Boom:
-            def model_info(self, repo_id):
-                raise RuntimeError("network down")
+    def test_hub_api_http_error_falls_through(self):
+        """A Hub/HTTP error (an OSError) falls through with a warning."""
+        snap = Path(tempfile.mkdtemp())
+        (snap / "config.json").write_text('{"model_type": "bert"}')
+        api = FakeApi(exc=OSError("404 Client Error"))
+        stderr = io.StringIO()
+        with mock.patch.object(cli, "_get_hf_api", return_value=api), \
+                contextlib.redirect_stderr(stderr):
+            result = cli.get_model_type(snap, "org/x")
+        self.assertEqual(result, cli.ModelFormat.OTHER)
+        self.assertIn("Hub lookup failed", stderr.getvalue())
 
-        fake.HfApi = Boom
-        sys.modules["huggingface_hub"] = fake
-        try:
-            import io
-            captured = io.StringIO()
-            old_stderr = sys.stderr
-            sys.stderr = captured
-            try:
-                result = cli.get_model_type(snap, "org/x")
-            finally:
-                sys.stderr = old_stderr
-            self.assertEqual(result, cli.ModelFormat.OTHER)
-            self.assertIn("Warning", captured.getvalue())
-        finally:
-            del sys.modules["huggingface_hub"]
+    def test_offline_skips_hub_lookup(self):
+        """HF_HUB_OFFLINE skips the Hub call entirely (F6)."""
+        snap = Path(tempfile.mkdtemp())
+        (snap / "config.json").write_text('{"model_type": "llama"}')
+        api = FakeApi(exc=AssertionError("Hub must not be queried when offline"))
+        with mock.patch.object(cli, "_get_hf_api", return_value=api), \
+                mock.patch.dict(os.environ, {"HF_HUB_OFFLINE": "1"}):
+            self.assertEqual(cli.get_model_type(snap, "org/x"), cli.ModelFormat.OTHER)
 
     def test_nested_gguf_detected(self):
         """GGUF in a subdirectory is detected (F4)."""
@@ -239,22 +260,6 @@ class TestGetModelType(unittest.TestCase):
         snap = Path(tempfile.mkdtemp())
         (snap / "config.json").write_text('{"model_type": ["llama"]}')
         self.assertEqual(cli.get_model_type(snap, "org/x"), "Unknown")
-
-    def test_hub_api_error_falls_through(self):
-        snap = Path(tempfile.mkdtemp())
-        (snap / "config.json").write_text('{"model_type": "bert"}')
-        fake = types.ModuleType("huggingface_hub")
-
-        class Boom:
-            def model_info(self, repo_id):
-                raise RuntimeError("network down")
-
-        fake.HfApi = Boom
-        sys.modules["huggingface_hub"] = fake
-        try:
-            self.assertEqual(cli.get_model_type(snap, "org/x"), cli.ModelFormat.OTHER)
-        finally:
-            del sys.modules["huggingface_hub"]
 
 
 class TestApplyDesiredState(unittest.TestCase):
@@ -278,7 +283,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_link_selected(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         tgt = self.lm / "org/model-a"
         self.assertTrue(tgt.is_dir())
@@ -286,7 +291,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_unlink_unselected(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         # Pre-create a symlink (as if previously linked).
         tgt = self.lm / "org/model-a"
         tgt.parent.mkdir(parents=True, exist_ok=True)
@@ -296,7 +301,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_preserve_real_files_in_directory(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "user_file.txt").write_text("keep me")
@@ -306,7 +311,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_skip_real_file_at_target(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         tgt = self.lm / "org/model-a"
         tgt.parent.mkdir(parents=True, exist_ok=True)
         tgt.write_text("real file")
@@ -316,7 +321,7 @@ class TestApplyDesiredState(unittest.TestCase):
 
     def test_idempotent_relink(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         cli.apply_desired_state(self.lm, discovered, {"org/model-a"})
         self.assertTrue((self.lm / "org/model-a" / "config.json").is_symlink())
@@ -426,10 +431,9 @@ class TestNoChangeOnConfirm(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         # Fully link the model first.
         cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
-        tgt = self.lm / "org/model-a"
         # UI initialization: fully linked → pre-selected (is_fully_linked True).
         self.assertTrue(cli.is_fully_linked(self.lm, "org/model-a", snap))
 
@@ -438,7 +442,7 @@ class TestNoChangeOnConfirm(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         # Fully link the model.
         cli.apply_desired_state(lm_dir=self.lm, discovered=discovered, desired={"org/model-a"})
         tgt = self.lm / "org/model-a"
@@ -476,7 +480,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         # Pre-create only config.json symlink (partial link)
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
@@ -487,7 +491,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
 
     def test_replace_wrong_symlink(self):
         snap = self._snapshot("aaa", {"config.json": '{"model_type": "llama"}'})
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "config.json").symlink_to("/tmp/wrong_target")
@@ -500,7 +504,7 @@ class TestApplyDesiredStateExtended(unittest.TestCase):
             "config.json": '{"model_type": "llama"}',
             "weights.bin": None,
         })
-        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", str(snap))]
+        discovered = [cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/model-a", snap)]
         tgt = self.lm / "org/model-a"
         tgt.mkdir(parents=True)
         (tgt / "config.json").symlink_to(snap / "config.json")
@@ -516,9 +520,9 @@ class TestSelectModels(unittest.TestCase):
     def _make_choices(self):
         snap = Path(tempfile.mkdtemp())
         return [
-            cli.ModelChoice("(llama) org/imported", "org/imported", True, str(snap)),
-            cli.ModelChoice("(llama) org/not-imported", "org/not-imported", False, str(snap)),
-            cli.ModelChoice("(llama) org/also-imported", "org/also-imported", True, str(snap)),
+            cli.ModelChoice("(llama) org/imported", "org/imported", True, snap),
+            cli.ModelChoice("(llama) org/not-imported", "org/not-imported", False, snap),
+            cli.ModelChoice("(llama) org/also-imported", "org/also-imported", True, snap),
         ]
 
     def test_pre_selects_imported_models(self):
@@ -535,8 +539,8 @@ class TestSelectModels(unittest.TestCase):
 class TestSelectDesired(unittest.TestCase):
     def test_autolink_all_selects_every_model(self):
         discovered = [
-            cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/a", "/x"),
-            cli.DiscoveredModel(cli.ModelFormat.MLX, "mlx-community/b", "/y"),
+            cli.DiscoveredModel(cli.ModelFormat.OTHER, "org/a", Path("/x")),
+            cli.DiscoveredModel(cli.ModelFormat.MLX, "mlx-community/b", Path("/y")),
         ]
         desired = cli.select_desired(discovered, autolink_all=True, lm_dir=Path("/tmp"))
         self.assertEqual(desired, {"org/a", "mlx-community/b"})
