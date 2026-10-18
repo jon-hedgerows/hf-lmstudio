@@ -1,18 +1,24 @@
+import argparse
 import json
+import logging
 import os
+import sys
 from enum import Enum
 from pathlib import Path
-import sys
-import argparse
 from typing import NamedTuple
 
 # credit: much of this was written by Ivan Fioravanti
+
+logger = logging.getLogger("hf_lmstudio")
 
 # Terminal key sequences (R7: named constants instead of magic literals).
 KEY_UP = "\x1b[A"
 KEY_DOWN = "\x1b[B"
 KEY_ENTER = "\r"
 KEY_CTRL_C = "\x03"
+
+# Seconds to wait for a Hub metadata request (N4: applied to model_info()).
+HUB_TIMEOUT_SECONDS = 30
 
 
 class ModelFormat(str, Enum):
@@ -33,19 +39,43 @@ _hf_api: object | None = None
 
 
 def _get_hf_api():
-    """Return a shared HfApi client with a timeout, or None if unavailable."""
+    """Return a shared HfApi client, or None if huggingface_hub is absent.
+
+    huggingface_hub is provided by the `hf` runtime under uvx, not a hard
+    install-time dependency (SPEC §4), so the import is lazy.
+    """
     global _hf_api
     if _hf_api is None:
         try:
             from huggingface_hub import HfApi
 
-            try:
-                _hf_api = HfApi(timeout=30)
-            except TypeError:
-                _hf_api = HfApi()
+            _hf_api = HfApi()
         except ImportError:
             _hf_api = None
     return _hf_api
+
+
+def _fetch_model_info(api, repo_id):
+    """Call ``api.model_info`` with a timeout (N4).
+
+    ``timeout`` was added to ``HfApi.model_info`` in newer huggingface_hub
+    releases; fall back to a call without it on versions that reject it.
+    """
+    try:
+        return api.model_info(repo_id, timeout=HUB_TIMEOUT_SECONDS)
+    except TypeError:
+        return api.model_info(repo_id)
+
+
+def _hub_offline() -> bool:
+    """True when ``HF_HUB_OFFLINE`` is set to a truthy value (F6)."""
+    value = os.environ.get("HF_HUB_OFFLINE", "").strip().lower()
+    return value not in ("", "0", "false", "no")
+
+
+def _warn(message: str) -> None:
+    """Print a warning/status message to stderr (R5)."""
+    print(message, file=sys.stderr)
 
 
 class DiscoveredModel(NamedTuple):
@@ -53,7 +83,7 @@ class DiscoveredModel(NamedTuple):
 
     model_type: ModelFormat
     model_name: str
-    snapshot_path: str
+    snapshot_path: Path
 
 
 class ModelChoice(NamedTuple):
@@ -62,7 +92,7 @@ class ModelChoice(NamedTuple):
     display_name: str
     model_name: str
     is_imported: bool
-    snapshot_path: str
+    snapshot_path: Path
 
 
 def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
@@ -108,12 +138,17 @@ def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
             print("\nImport is cancelled. Do nothing.")
             sys.exit(0)
 
-    return [choice for choice, is_selected in zip(model_choices, selected) if is_selected]
+    return [
+        choice
+        for choice, is_selected in zip(model_choices, selected, strict=False)
+        if is_selected
+    ]
 
 
 def get_key():
     """Get a single keypress from the user."""
-    import tty, termios
+    import termios
+    import tty
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
@@ -127,14 +162,64 @@ def get_key():
     return ch
 
 
+def _classify_via_hub(repo_id: str) -> ModelFormat | None:
+    """Hub-metadata tier (SPEC §2.4, F6, N4).
+
+    Returns a format when the Hub tags/``library_name``/``gguf`` metadata
+    identifies one, otherwise None. A shared client is reused across models,
+    ``model_info()`` is given a timeout, and ``HF_HUB_OFFLINE`` short-circuits
+    the call entirely.
+    """
+    api = _get_hf_api()
+    if api is None or _hub_offline():
+        return None
+    try:
+        info = _fetch_model_info(api, repo_id)
+        library = (getattr(info, "library_name", None) or "").lower()
+        tags = {str(t).lower() for t in (getattr(info, "tags", None) or [])}
+        if library == "gguf" or "gguf" in tags or getattr(info, "gguf", None):
+            return ModelFormat.GGUF
+        if library == "mlx" or "mlx" in tags:
+            return ModelFormat.MLX
+    except OSError as exc:
+        # HfHubHTTPError (404/401/...) is an OSError, as are transport errors
+        # from the HTTP layer: report and fall through.
+        logger.warning("Hub lookup failed for %s: %s", repo_id, exc)
+    except Exception:
+        # Unexpected, non-network error: never let a single model abort
+        # discovery, but surface it rather than swallowing it silently.
+        logger.warning(
+            "Unexpected error classifying %s via the Hub", repo_id, exc_info=True
+        )
+    return None
+
+
+def _classify_via_config(path: Path) -> ModelFormat | None:
+    """config.json fallback: any present ``model_type`` means "Other".
+
+    Architecture is deliberately not part of the format contract (SPEC §2.4).
+    """
+    config_path = path / "config.json"
+    if not config_path.exists():
+        return None
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    value = config.get("model_type")
+    if isinstance(value, str) and value:
+        return ModelFormat.OTHER
+    return None
+
+
 def get_model_type(snapshot_path: str | Path, repo_id: str) -> ModelFormat:
     """Classify a model's file format (SPEC §2.4).
 
     Tiers, in order: local GGUF check, mlx-community organisation check,
-    Hub metadata (library/tags) via huggingface_hub, config.json model_type
-    fallback. Returns ModelFormat.UNKNOWN when nothing applies; such models
-    are included in the discovery list for user selection (clarification to
-    SPEC §2.4).
+    Hub metadata (``library_name``/tags/``gguf``) via huggingface_hub,
+    config.json model_type fallback. Returns ModelFormat.UNKNOWN when nothing
+    applies; such models are included in the discovery list for user selection
+    (clarification to SPEC §2.4).
     """
     path = Path(snapshot_path)
     if not path.is_dir():
@@ -142,58 +227,20 @@ def get_model_type(snapshot_path: str | Path, repo_id: str) -> ModelFormat:
 
     # 1. Local GGUF check (recursive: snapshots preserve subdirectories,
     #    and GGUF repos commonly place files in per-quantisation folders).
-    if any(
-        p.is_file() and p.suffix.lower() == ".gguf"
-        for p in path.rglob("*")
-    ):
+    if any(p.is_file() and p.suffix.lower() == ".gguf" for p in path.rglob("*")):
         return ModelFormat.GGUF
 
     # 2. Organisation check (case-insensitive).
     if repo_id.lower().startswith("mlx-community/"):
         return ModelFormat.MLX
 
-    # 3. Hub metadata (huggingface_hub is provided by the `hf` runtime, not a
-    #    hard dependency -- imported lazily, SPEC §4). A shared client is
-    #    reused across models with a timeout; HF_HUB_OFFLINE short-circuits
-    #    the call entirely (F6).
-    try:
-        from huggingface_hub.errors import HfHubHTTPError
-    except ImportError:
-        HfHubHTTPError = Exception
-
-    api = _get_hf_api()
-    if api is not None and not os.environ.get("HF_HUB_OFFLINE"):
-        try:
-            info = api.model_info(repo_id)
-            library = (getattr(info, "library_name", None) or "").lower()
-            tags = {str(t).lower() for t in (getattr(info, "tags", None) or [])}
-            if library == "gguf" or "gguf" in tags or getattr(info, "gguf", None):
-                return ModelFormat.GGUF
-            if library == "mlx" or "mlx" in tags:
-                return ModelFormat.MLX
-        except HfHubHTTPError as exc:
-            print(
-                f"Warning: Hub lookup failed for {repo_id}: {exc}", file=sys.stderr
-            )
-        except (OSError, TimeoutError) as exc:
-            print(
-                f"Warning: network error for {repo_id}: {exc}", file=sys.stderr
-            )
-
-    # 4. config.json fallback: any present model_type means "Other"
-    #    (architecture is not part of the format contract).
-    config_path = path / "config.json"
-    if config_path.exists():
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            value = config.get("model_type")
-            if isinstance(value, str) and value:
-                return ModelFormat.OTHER
-        except (json.JSONDecodeError, OSError):
-            pass
+    # 3 & 4. Hub metadata, then config.json fallback.
+    result = _classify_via_hub(repo_id)
+    if result is None:
+        result = _classify_via_config(path)
 
     # 5. Could not classify.
-    return ModelFormat.UNKNOWN
+    return result if result is not None else ModelFormat.UNKNOWN
 
 
 def manage_models(autolink_all: bool = False) -> None:
@@ -267,11 +314,11 @@ def discover_models(hub_dir: str | Path) -> list[DiscoveredModel]:
             if not ref_file.is_file():
                 continue
             try:
-                with open(ref_file, "r", encoding="utf-8") as f:
+                with open(ref_file, encoding="utf-8") as f:
                     ref = f.read()
             except OSError:
                 # Report and skip unreadable refs rather than crashing.
-                print(f"Skipping {model_name}: could not read ref {ref_file}")
+                _warn(f"Skipping {model_name}: could not read ref {ref_file}")
                 continue
             # now have a snapshot reference, determine the snapshot path
             snapshot_path = snapshots_dir / ref
@@ -279,7 +326,7 @@ def discover_models(hub_dir: str | Path) -> list[DiscoveredModel]:
                 # Snapshot no longer in the cache (model removed). Skip it from
                 # discovery so any existing link is left for
                 # cleanup_dangling_links to remove.
-                print(f"Skipping {model_name}: snapshot no longer in cache")
+                _warn(f"Skipping {model_name}: snapshot no longer in cache")
                 continue
 
             # Determine model type accurately using the helper function.
@@ -350,9 +397,68 @@ def select_desired(
     return {choice.model_name for choice in selected}
 
 
+def _link_snapshot_item(target_path: Path, item: Path, model_name: str) -> None:
+    """Create or correct a single symlink for a snapshot entry (SPEC §2.5)."""
+    link_path = target_path / item.name
+    if link_path.is_symlink():
+        # Keep a correct symlink; replace a wrong one. realpath resolves
+        # relative symlink targets against the link's location (HF cache
+        # snapshots use relative paths).
+        try:
+            if os.path.realpath(link_path) == os.path.realpath(item):
+                return
+        except OSError:
+            pass
+        link_path.unlink()
+    elif link_path.exists():
+        # Real user file/directory: never overwrite.
+        _warn(f"Skipping {model_name}/{item.name}: real file at link target")
+        return
+    os.symlink(item, link_path)
+
+
+def _link_model(lm_dir: Path, model_name: str, snapshot_path: Path) -> None:
+    """Link every snapshot file into ``lm_dir/model_name`` (SPEC §2.5)."""
+    target_path = lm_dir / model_name
+    if (
+        target_path.exists()
+        and not target_path.is_dir()
+        and not target_path.is_symlink()
+    ):
+        # Real file at the link target: never touch it.
+        _warn(f"Skipping {model_name}: real file at link target")
+        return
+    if target_path.is_symlink():
+        # Replace an existing symlink with a directory of symlinks.
+        target_path.unlink()
+    target_path.mkdir(parents=True, exist_ok=True)
+    for item in Path(snapshot_path).iterdir():
+        _link_snapshot_item(target_path, item, model_name)
+    print(f"Linked {model_name}")
+
+
+def _unlink_model(lm_dir: Path, model_name: str) -> None:
+    """Remove links we created for ``model_name``, keeping user files (§2.6)."""
+    target_path = lm_dir / model_name
+    if target_path.is_symlink():
+        target_path.unlink()
+        print(f"Unlinked {model_name}")
+    elif target_path.is_dir():
+        # Our link directory: drop the symlink entries we created, then remove
+        # the directory if it is now empty. User files are kept.
+        for child in list(target_path.iterdir()):
+            if child.is_symlink():
+                child.unlink()
+        try:
+            target_path.rmdir()
+            print(f"Unlinked {model_name}")
+        except OSError:
+            print(f"Unlinked {model_name}: user files kept, directory remains")
+
+
 def apply_desired_state(
     lm_dir: str | Path,
-    discovered: list[tuple[ModelFormat, str, str]],
+    discovered: list[DiscoveredModel],
     desired: set[str],
 ) -> None:
     """Make the LM Studio dir match the desired state (SPEC §2.5, §2.6).
@@ -362,61 +468,12 @@ def apply_desired_state(
     directories that the user created are never modified or deleted; only
     symlinks we created are created or removed.
     """
+    lm_dir = Path(lm_dir)
     for model in discovered:
-        model_name = model.model_name
-        snapshot_path = model.snapshot_path
-        target_path = lm_dir / model_name
-        if model_name in desired:
-            # Selected: ensure every snapshot file is symlinked into the
-            # target directory. Never modify or delete real user files.
-            if (
-                target_path.exists()
-                and not target_path.is_dir()
-                and not target_path.is_symlink()
-            ):
-                # Real file at the link target: never touch it.
-                print(f"Skipping {model_name}: real file at link target")
-                continue
-            if target_path.is_symlink():
-                # Replace an existing symlink with a directory of symlinks.
-                target_path.unlink()
-            target_path.mkdir(parents=True, exist_ok=True)
-            for item in Path(snapshot_path).iterdir():
-                link_path = target_path / item.name
-                if link_path.is_symlink():
-                    # Keep a correct symlink; replace a wrong one.
-                    # realpath resolves relative symlink targets against the
-                    # link's location (HF cache snapshots use relative paths).
-                    try:
-                        if os.path.realpath(link_path) == os.path.realpath(item):
-                            continue  # already correct
-                    except OSError:
-                        pass
-                    link_path.unlink()
-                elif link_path.exists():
-                    # Real user file/directory: never overwrite.
-                    print(
-                        f"Skipping {model_name}/{item.name}: real file at link target"
-                    )
-                    continue
-                os.symlink(item, link_path)
-            print(f"Linked {model_name}")
+        if model.model_name in desired:
+            _link_model(lm_dir, model.model_name, model.snapshot_path)
         else:
-            # Not selected: remove any link we created for this model.
-            if target_path.is_symlink():
-                target_path.unlink()
-                print(f"Unlinked {model_name}")
-            elif target_path.is_dir():
-                # Our link directory: drop the symlink entries we created, then
-                # remove the directory if it is now empty. User files are kept.
-                for child in list(target_path.iterdir()):
-                    if child.is_symlink():
-                        child.unlink()
-                try:
-                    target_path.rmdir()
-                    print(f"Unlinked {model_name}")
-                except OSError:
-                    print(f"Unlinked {model_name}: user files kept, directory remains")
+            _unlink_model(lm_dir, model.model_name)
 
 
 def cleanup_dangling_links(lm_dir: str | Path, hub_dir: str | Path) -> None:
@@ -451,7 +508,7 @@ def cleanup_dangling_links(lm_dir: str | Path, hub_dir: str | Path) -> None:
                 entry.unlink()
 
     # Prune empty directories left behind, never removing lm_dir itself.
-    for root, dirs, files in os.walk(lm_dir, topdown=False):
+    for root, _dirs, _files in os.walk(lm_dir, topdown=False):
         root_path = Path(root)
         if root_path == lm_dir:
             continue
@@ -474,6 +531,11 @@ def main() -> None:
         help="Link all models without interactive selection",
     )
     args = parser.parse_args()
+    if not args.all and not sys.stdin.isatty():
+        parser.error(
+            "no terminal available for interactive selection; "
+            "use --all to link every model without a prompt"
+        )
     manage_models(autolink_all=args.all)
 
 

@@ -9,6 +9,9 @@ description = "Link models in the hf cache to the LM Studio/Bionic downloads fol
 authors = [{ name = "Jon Davies" }, { name = "Ivan Fioravanti" }]
 requires-python = ">=3.10"
 dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff==0.17.1"]
 license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Python :: 3",

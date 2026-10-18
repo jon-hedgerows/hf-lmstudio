@@ -25,13 +25,20 @@ The software follows a simple, procedural CLI architecture designed for interact
    - Deduplicates discovered models by model name so multiple refs for one repo yield a single entry.
 
 3. **Model Classification (`get_model_type`)**:
-   - Multi-tier classification (SPEC §2.4):
-     1. Local GGUF check: any `.gguf` file in the snapshot directory → `GGUF`.
-     2. Organisation check: repo ID starting with `mlx-community/` → `MLX`.
-     3. Hub metadata via `huggingface_hub.HfApi().model_info()` (imported lazily at runtime, not a hard dependency): `library == "gguf"`/`mlx` or matching tags → `GGUF`/`MLX`.
-     4. `config.json` `model_type` fallback (lowercased).
-     5. `Unknown` when nothing applies. Such models are included in the
-        discovery list and shown in the UI as "(unknown)"; the user decides
+   - Multi-tier classification (SPEC §2.4), returning a `ModelFormat` enum
+     (`GGUF`, `MLX`, `OTHER`, `UNKNOWN`):
+     1. Local GGUF check: any `.gguf` file in the snapshot directory
+        (searched recursively, case-insensitively) → `GGUF`.
+     2. Organisation check: repo ID starting with `mlx-community/`
+        (case-insensitive) → `MLX`.
+     3. Hub metadata via `huggingface_hub.HfApi().model_info()` (imported
+        lazily at runtime, not a hard dependency), skipped when
+        `HF_HUB_OFFLINE` is set: `library_name == "gguf"`/`"mlx"`, a matching
+        tag, or a populated `gguf` attribute → `GGUF`/`MLX`.
+     4. `config.json` `model_type` fallback: any present `model_type` →
+        `OTHER`.
+     5. `UNKNOWN` when nothing applies. Such models are included in the
+        discovery list and shown in the UI as "(Unknown)"; the user decides
         whether to link them (clarification to SPEC §2.4).
 
 4. **Interactive UI (`select_models`, `get_key`, `select_desired`)**:
@@ -65,4 +72,4 @@ The software follows a simple, procedural CLI architecture designed for interact
 ## Known Limitations & Future Work
 
 - **Terminal handling**: Raw-mode key input relies on POSIX `termios`; Windows is unsupported.
-- `docs/Design.md` and `docs/model_type_changes.md` remain for historical context per SPEC §5; this document reflects the current implementation (steps 1–8 of `docs/changes.md`).
+- `docs/Design.md` and `docs/model_type_changes.md` remain for historical context per SPEC §5; this document reflects the current implementation (Stages 1–8 of `docs/changes.md` plus the code-review fixes in `docs/code_review.md`).

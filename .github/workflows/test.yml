@@ -2,9 +2,7 @@ name: Test
 
 on:
   push:
-    branches: [main, spec-updates]
   pull_request:
-    branches: [main]
 
 jobs:
   test:
@@ -19,7 +17,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install ruff
-        run: pip install ruff
+        run: pip install ruff==0.17.1
       - name: Run ruff check
         run: ruff check .
       - name: Run tests
