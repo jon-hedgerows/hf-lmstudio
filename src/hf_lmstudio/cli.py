@@ -3,7 +3,6 @@ import os
 from enum import Enum
 from pathlib import Path
 import sys
-import glob
 import argparse
 from typing import NamedTuple
 
@@ -199,12 +198,15 @@ def manage_models(autolink_all: bool = False) -> None:
     )
     # the lm studio models dir is defined in settings.json, or is ~/.lmstudio/models
     try:
-        with open(
-            Path(os.path.expanduser("~/.lmstudio/settings.json"))
-        ) as settings_file:
+        settings_path = Path(os.path.expanduser("~/.lmstudio/settings.json"))
+        with open(settings_path) as settings_file:
             settings = json.load(settings_file)
-            lm_studio_dir = Path(settings["downloadsFolder"])
-    except (json.JSONDecodeError, FileNotFoundError):
+        downloads_folder = settings.get("downloadsFolder")
+        if downloads_folder:
+            lm_studio_dir = Path(downloads_folder)
+        else:
+            lm_studio_dir = Path(os.path.expanduser("~/.lmstudio/models"))
+    except (json.JSONDecodeError, FileNotFoundError, KeyError, OSError):
         # if there's an error while reading the models dir, set it to the default
         lm_studio_dir = Path(os.path.expanduser("~/.lmstudio/models"))
 
@@ -232,25 +234,25 @@ def discover_models(hub_dir: str | Path) -> list[DiscoveredModel]:
     """
     found_models: list[DiscoveredModel] = []
     seen_models: set[str] = set()
-    for model_dir in glob.glob(os.path.join(hub_dir, "models--*")):
-        refs_dir = Path(os.path.join(model_dir, "refs"))
-        snapshots_dir = Path(os.path.join(model_dir, "snapshots"))
+    hub_path = Path(hub_dir)
+    for model_dir in hub_path.glob("models--*"):
+        refs_dir = model_dir / "refs"
+        snapshots_dir = model_dir / "snapshots"
         if not refs_dir.exists():
             continue
 
-        # and get the model name
-        parts = model_dir.split("--")
-        model_name = "/".join(parts[1:])
+        # R4: derive repo id from the final path component only.
+        model_name = model_dir.name.removeprefix("models--").replace("--", "/")
 
         # Dedupe discovered models by model name: first snapshot wins.
         if model_name in seen_models:
             continue
 
         # Search for refs
-        for ref_file in glob.glob(os.path.join(refs_dir, "*")):
+        for ref_file in refs_dir.glob("*"):
             # Skip directory entries in refs/ (e.g. refs/refs/pr/1)
             # described in docs/huggingface-cache.md (SPEC §2.3).
-            if not Path(ref_file).is_file():
+            if not ref_file.is_file():
                 continue
             try:
                 with open(ref_file, "r", encoding="utf-8") as f:
@@ -260,8 +262,8 @@ def discover_models(hub_dir: str | Path) -> list[DiscoveredModel]:
                 print(f"Skipping {model_name}: could not read ref {ref_file}")
                 continue
             # now have a snapshot reference, determine the snapshot path
-            snapshot_path = os.path.join(snapshots_dir, ref)
-            if not Path(snapshot_path).is_dir():
+            snapshot_path = snapshots_dir / ref
+            if not snapshot_path.is_dir():
                 # Snapshot no longer in the cache (model removed). Skip it from
                 # discovery so any existing link is left for
                 # cleanup_dangling_links to remove.
