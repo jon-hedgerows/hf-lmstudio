@@ -18,7 +18,7 @@ def select_models(model_choices):
     while True:
         print("\033[H\033[J", end="")
         print(
-            "❯ hf lmstudio - Hugging Face Model Link \nAvailable models (↑/↓ to navigate, SPACE to select, ENTER to confirm, Ctrl+C to quit):"
+            "❯ hf lmstudio - Hugging Face LM Studio Model Link \nAvailable models (↑/↓ to navigate, SPACE to select, ENTER to confirm, Ctrl+C to quit):"
         )
 
         window_start = max(
@@ -71,47 +71,64 @@ def get_model_type(snapshot_path, repo_id):
 
     Tiers, in order: local GGUF check, mlx-community organisation check,
     Hub metadata (library/tags) via huggingface_hub, config.json model_type
-    fallback. Returns "Unknown" when nothing applies; callers skip those
-    models (SPEC §2.4).
+    fallback. Returns "Unknown" when nothing applies; such models are
+    included in the discovery list for user selection (clarification to
+    SPEC §2.4).
     """
-    snapshot_path = Path(snapshot_path)
-    if not snapshot_path.is_dir():
+    path = Path(snapshot_path)
+    if not path.is_dir():
         return "Unknown"
 
-    # 1. Local GGUF check.
-    if any(item.suffix == ".gguf" for item in snapshot_path.iterdir()):
+    # 1. Local GGUF check (recursive: snapshots preserve subdirectories,
+    #    and GGUF repos commonly place files in per-quantisation folders).
+    if any(
+        p.is_file() and p.suffix.lower() == ".gguf"
+        for p in path.rglob("*")
+    ):
         return "GGUF"
 
-    # 2. Organisation check.
-    if repo_id.startswith("mlx-community/"):
+    # 2. Organisation check (case-insensitive).
+    if repo_id.lower().startswith("mlx-community/"):
         return "MLX"
 
     # 3. Hub metadata (huggingface_hub is provided by the `hf` runtime, not a
     #    hard dependency -- imported lazily, SPEC §4).
     try:
         from huggingface_hub import HfApi
+    except ImportError:
+        HfApi = None
 
-        info = HfApi().model_info(repo_id)
-        library = getattr(info, "library", None) or ""
-        tags = getattr(info, "tags", None) or []
-        tag_set = {str(t).lower() for t in tags}
-        if library.lower() == "gguf" or "gguf" in tag_set:
-            return "GGUF"
-        if library.lower() == "mlx" or "mlx" in tag_set:
-            return "MLX"
-    except Exception:
-        # ImportError, network error, private model, etc.: fall through.
-        pass
+    try:
+        from huggingface_hub.errors import HfHubHTTPError
+    except ImportError:
+        HfHubHTTPError = Exception
+
+    if HfApi is not None and not os.environ.get("HF_HUB_OFFLINE"):
+        try:
+            info = HfApi().model_info(repo_id)
+            library = (getattr(info, "library_name", None) or "").lower()
+            tags = {str(t).lower() for t in (getattr(info, "tags", None) or [])}
+            if library == "gguf" or "gguf" in tags or getattr(info, "gguf", None):
+                return "GGUF"
+            if library == "mlx" or "mlx" in tags:
+                return "MLX"
+        except HfHubHTTPError as exc:
+            print(
+                f"Warning: Hub lookup failed for {repo_id}: {exc}", file=sys.stderr
+            )
+        except (OSError, TimeoutError) as exc:
+            print(
+                f"Warning: network error for {repo_id}: {exc}", file=sys.stderr
+            )
 
     # 4. config.json fallback.
-    config_path = snapshot_path / "config.json"
+    config_path = path / "config.json"
     if config_path.exists():
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            model_type = config.get("model_type", "").lower()
-            if model_type:
-                return model_type
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            value = config.get("model_type")
+            if isinstance(value, str) and value:
+                return value.lower()
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -281,7 +298,11 @@ def apply_desired_state(lm_dir, discovered, desired):
         if model_name in desired:
             # Selected: ensure every snapshot file is symlinked into the
             # target directory. Never modify or delete real user files.
-            if target_path.exists() and not target_path.is_dir() and not target_path.is_symlink():
+            if (
+                target_path.exists()
+                and not target_path.is_dir()
+                and not target_path.is_symlink()
+            ):
                 # Real file at the link target: never touch it.
                 print(f"Skipping {model_name}: real file at link target")
                 continue

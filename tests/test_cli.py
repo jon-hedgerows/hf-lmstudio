@@ -158,7 +158,7 @@ class TestGetModelType(unittest.TestCase):
         fake = types.ModuleType("huggingface_hub")
 
         class FakeInfo:
-            library = "gguf"
+            library_name = "gguf"
             tags = []
 
         class FakeHfApi:
@@ -171,6 +171,71 @@ class TestGetModelType(unittest.TestCase):
             self.assertEqual(cli.get_model_type(snap, "org/whatever"), "GGUF")
         finally:
             del sys.modules["huggingface_hub"]
+
+    def test_hub_api_library_name_only(self):
+        """library_name alone (no matching tag) still classifies as GGUF."""
+        snap = Path(tempfile.mkdtemp())
+        (snap / "config.json").write_text('{"model_type": "bert"}')
+        fake = types.ModuleType("huggingface_hub")
+
+        class FakeInfo:
+            library_name = "mlx"
+            tags = []
+
+        class FakeHfApi:
+            def model_info(self, repo_id):
+                return FakeInfo()
+
+        fake.HfApi = FakeHfApi
+        sys.modules["huggingface_hub"] = fake
+        try:
+            self.assertEqual(cli.get_model_type(snap, "org/whatever"), "MLX")
+        finally:
+            del sys.modules["huggingface_hub"]
+
+    def test_hub_api_error_logged_to_stderr(self):
+        snap = Path(tempfile.mkdtemp())
+        (snap / "config.json").write_text('{"model_type": "bert"}')
+        fake = types.ModuleType("huggingface_hub")
+
+        class Boom:
+            def model_info(self, repo_id):
+                raise RuntimeError("network down")
+
+        fake.HfApi = Boom
+        sys.modules["huggingface_hub"] = fake
+        try:
+            import io
+            captured = io.StringIO()
+            old_stderr = sys.stderr
+            sys.stderr = captured
+            try:
+                result = cli.get_model_type(snap, "org/x")
+            finally:
+                sys.stderr = old_stderr
+            self.assertEqual(result, "bert")
+            self.assertIn("Warning", captured.getvalue())
+        finally:
+            del sys.modules["huggingface_hub"]
+
+    def test_nested_gguf_detected(self):
+        """GGUF in a subdirectory is detected (F4)."""
+        snap = Path(tempfile.mkdtemp())
+        sub = snap / "Q4_K_M"
+        sub.mkdir()
+        (sub / "model-00001-of-2.gguf").write_bytes(b"\x00" * 10)
+        self.assertEqual(cli.get_model_type(snap, "org/any"), "GGUF")
+
+    def test_case_insensitive_gguf_suffix(self):
+        snap = Path(tempfile.mkdtemp())
+        (snap / "model.GGUF").write_bytes(b"\x00" * 10)
+        self.assertEqual(cli.get_model_type(snap, "org/any"), "GGUF")
+
+    def test_non_string_model_type_guard(self):
+        """Non-string config.json model_type does not crash discovery (F5)."""
+        snap = Path(tempfile.mkdtemp())
+        (snap / "config.json").write_text('{"model_type": ["llama"]}')
+        self.assertEqual(cli.get_model_type(snap, "org/x"), "Unknown")
 
     def test_hub_api_error_falls_through(self):
         snap = Path(tempfile.mkdtemp())
