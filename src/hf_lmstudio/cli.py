@@ -1,11 +1,25 @@
 import json
 import os
+from enum import Enum
 from pathlib import Path
 import sys
 import glob
 import argparse
 
 # credit: much of this was written by Ivan Fioravanti
+
+
+class ModelFormat(str, Enum):
+    """Model file format classification (SPEC §2.4).
+
+    Using str, Enum keeps values comparable to plain strings while giving
+    an explicit, documented set of formats.
+    """
+
+    GGUF = "GGUF"
+    MLX = "MLX"
+    OTHER = "Other"
+    UNKNOWN = "Unknown"
 
 
 def select_models(model_choices):
@@ -66,18 +80,18 @@ def get_key():
     return ch
 
 
-def get_model_type(snapshot_path, repo_id):
-    """Classify a model as GGUF, MLX, or another type (SPEC §2.4).
+def get_model_type(snapshot_path: str | Path, repo_id: str) -> ModelFormat:
+    """Classify a model's file format (SPEC §2.4).
 
     Tiers, in order: local GGUF check, mlx-community organisation check,
     Hub metadata (library/tags) via huggingface_hub, config.json model_type
-    fallback. Returns "Unknown" when nothing applies; such models are
-    included in the discovery list for user selection (clarification to
+    fallback. Returns ModelFormat.UNKNOWN when nothing applies; such models
+    are included in the discovery list for user selection (clarification to
     SPEC §2.4).
     """
     path = Path(snapshot_path)
     if not path.is_dir():
-        return "Unknown"
+        return ModelFormat.UNKNOWN
 
     # 1. Local GGUF check (recursive: snapshots preserve subdirectories,
     #    and GGUF repos commonly place files in per-quantisation folders).
@@ -85,11 +99,11 @@ def get_model_type(snapshot_path, repo_id):
         p.is_file() and p.suffix.lower() == ".gguf"
         for p in path.rglob("*")
     ):
-        return "GGUF"
+        return ModelFormat.GGUF
 
     # 2. Organisation check (case-insensitive).
     if repo_id.lower().startswith("mlx-community/"):
-        return "MLX"
+        return ModelFormat.MLX
 
     # 3. Hub metadata (huggingface_hub is provided by the `hf` runtime, not a
     #    hard dependency -- imported lazily, SPEC §4).
@@ -109,9 +123,9 @@ def get_model_type(snapshot_path, repo_id):
             library = (getattr(info, "library_name", None) or "").lower()
             tags = {str(t).lower() for t in (getattr(info, "tags", None) or [])}
             if library == "gguf" or "gguf" in tags or getattr(info, "gguf", None):
-                return "GGUF"
+                return ModelFormat.GGUF
             if library == "mlx" or "mlx" in tags:
-                return "MLX"
+                return ModelFormat.MLX
         except HfHubHTTPError as exc:
             print(
                 f"Warning: Hub lookup failed for {repo_id}: {exc}", file=sys.stderr
@@ -121,22 +135,23 @@ def get_model_type(snapshot_path, repo_id):
                 f"Warning: network error for {repo_id}: {exc}", file=sys.stderr
             )
 
-    # 4. config.json fallback.
+    # 4. config.json fallback: any present model_type means "Other"
+    #    (architecture is not part of the format contract).
     config_path = path / "config.json"
     if config_path.exists():
         try:
             config = json.loads(config_path.read_text(encoding="utf-8"))
             value = config.get("model_type")
             if isinstance(value, str) and value:
-                return value.lower()
+                return ModelFormat.OTHER
         except (json.JSONDecodeError, OSError):
             pass
 
     # 5. Could not classify.
-    return "Unknown"
+    return ModelFormat.UNKNOWN
 
 
-def manage_models(autolink_all: bool = False):
+def manage_models(autolink_all: bool = False) -> None:
     """Import models from the Hugging Face cache."""
     # the hub dir is set by $HF_HUB_CACHE if defined, or $HF_HOME/hub if defined, or ~/.cache/huggingface/hub
     hub_dir = Path(
@@ -173,15 +188,16 @@ def manage_models(autolink_all: bool = False):
     cleanup_dangling_links(lm_studio_dir, hub_dir)
 
 
-def discover_models(hub_dir):
+def discover_models(hub_dir: str | Path) -> list[tuple[ModelFormat, str, str]]:
     """Discover and classify models in the Hugging Face Hub cache.
 
-    Returns a list of (model_type, model_name, snapshot_path) tuples for
-    classifiable models. Unclassifiable models are reported and skipped
-    (SPEC §2.4); discovery never crashes on unusual cache layout (SPEC §2.3).
+    Returns a list of (model_type, model_name, snapshot_path) tuples.
+    Unclassifiable models are labelled ModelFormat.UNKNOWN and included so
+    the user can decide whether to link them (clarification to SPEC §2.4);
+    discovery never crashes on unusual cache layout (SPEC §2.3).
     """
-    found_models = []
-    seen_models = set()
+    found_models: list[tuple[ModelFormat, str, str]] = []
+    seen_models: set[str] = set()
     for model_dir in glob.glob(os.path.join(hub_dir, "models--*")):
         refs_dir = Path(os.path.join(model_dir, "refs"))
         snapshots_dir = Path(os.path.join(model_dir, "snapshots"))
@@ -214,14 +230,11 @@ def discover_models(hub_dir):
             if not Path(snapshot_path).is_dir():
                 # Snapshot no longer in the cache (model removed). Skip it from
                 # discovery so any existing link is left for
-                # cleanup_dangling_links to remove (SPEC §6.3).
+                # cleanup_dangling_links to remove.
                 print(f"Skipping {model_name}: snapshot no longer in cache")
                 continue
 
             # Determine model type accurately using the helper function.
-            # Models that cannot be classified are marked "Unknown" and
-            # included in the discovery list: the user decides whether to
-            # link them (clarification to SPEC §2.4).
             model_type = get_model_type(snapshot_path, model_name)
 
             # Store model_type, model_name, and snapshot_path
@@ -231,7 +244,7 @@ def discover_models(hub_dir):
     return found_models
 
 
-def is_fully_linked(lm_dir, model_name, snapshot_path):
+def is_fully_linked(lm_dir: str | Path, model_name: str, snapshot_path: str | Path) -> bool:
     """Return True if every file in ``snapshot_path`` is present as a correct
     symlink in ``lm_dir/model_name`` (SPEC §2.6 UI initialization).
 
@@ -257,7 +270,11 @@ def is_fully_linked(lm_dir, model_name, snapshot_path):
     return True
 
 
-def select_desired(models, autolink_all, lm_dir):
+def select_desired(
+    models: list[tuple[ModelFormat, str, str]],
+    autolink_all: bool,
+    lm_dir: str | Path,
+) -> set[str]:
     """Return the set of model names the user wants linked (desired state).
 
     With --all, every classifiable model is selected without a terminal
@@ -272,20 +289,24 @@ def select_desired(models, autolink_all, lm_dir):
     if autolink_all:
         return {model_name for _, model_name, _ in models}
 
-    model_choices = []
+    model_choices: list[tuple[str, str, bool, str]] = []
     for model_type, model_name, snapshot_path in sorted(
         models, key=lambda elem: elem[1].lower()
     ):
         is_imported = is_fully_linked(lm_dir, model_name, snapshot_path)
         status = " (already imported)" if is_imported else ""
-        display_name = f"({model_type}) {model_name}{status}"
+        display_name = f"({model_type.value}) {model_name}{status}"
         model_choices.append((display_name, model_name, is_imported, snapshot_path))
 
     selected = select_models(model_choices)
     return {model_name for _, model_name, _, _ in selected}
 
 
-def apply_desired_state(lm_dir, discovered, desired):
+def apply_desired_state(
+    lm_dir: str | Path,
+    discovered: list[tuple[ModelFormat, str, str]],
+    desired: set[str],
+) -> None:
     """Make the LM Studio dir match the desired state (SPEC §2.5, §2.6).
 
     Selected models are linked as a directory of symlinks into the HF cache;
@@ -348,9 +369,9 @@ def apply_desired_state(lm_dir, discovered, desired):
                     print(f"Unlinked {model_name}: user files kept, directory remains")
 
 
-def cleanup_dangling_links(lm_dir, hub_dir):
+def cleanup_dangling_links(lm_dir: str | Path, hub_dir: str | Path) -> None:
     """Remove dangling symlinks that point into the HF cache, then prune
-    now-empty directories (SPEC §2.6, §6.3).
+    now-empty directories (SPEC §2.6).
 
     This also removes links for models that have been removed from the Hub
     cache: once the snapshot disappears, those symlinks dangle and are
@@ -390,8 +411,8 @@ def cleanup_dangling_links(lm_dir, hub_dir):
             pass
 
 
-def main():
-    """Entry point for uvx execution"""
+def main() -> None:
+    """Entry point for uvx execution."""
     parser = argparse.ArgumentParser(
         prog="hf lmstudio",
         description="Link models in the hf cache to the LM Studio/Bionic downloads folder.",

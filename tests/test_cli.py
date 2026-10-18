@@ -59,7 +59,7 @@ class TestDiscoverModels(unittest.TestCase):
         self.assertEqual(len(found), 1)
         mt, name, snap = found[0]
         self.assertEqual(name, "org/alpha")
-        self.assertEqual(mt, "llama")
+        self.assertEqual(mt, cli.ModelFormat.OTHER)
         self.assertTrue(Path(snap).is_dir())
 
     def test_multiple_refs_yield_single_entry(self):
@@ -142,7 +142,7 @@ class TestGetModelType(unittest.TestCase):
     def test_config_json_fallback(self):
         snap = Path(tempfile.mkdtemp())
         (snap / "config.json").write_text('{"model_type": "Llama"}')
-        self.assertEqual(cli.get_model_type(snap, "org/llama"), "llama")
+        self.assertEqual(cli.get_model_type(snap, "org/llama"), cli.ModelFormat.OTHER)
 
     def test_unknown_when_nothing_identifiable(self):
         snap = Path(tempfile.mkdtemp())
@@ -213,7 +213,7 @@ class TestGetModelType(unittest.TestCase):
                 result = cli.get_model_type(snap, "org/x")
             finally:
                 sys.stderr = old_stderr
-            self.assertEqual(result, "bert")
+            self.assertEqual(result, cli.ModelFormat.OTHER)
             self.assertIn("Warning", captured.getvalue())
         finally:
             del sys.modules["huggingface_hub"]
@@ -249,7 +249,7 @@ class TestGetModelType(unittest.TestCase):
         fake.HfApi = Boom
         sys.modules["huggingface_hub"] = fake
         try:
-            self.assertEqual(cli.get_model_type(snap, "org/x"), "bert")
+            self.assertEqual(cli.get_model_type(snap, "org/x"), cli.ModelFormat.OTHER)
         finally:
             del sys.modules["huggingface_hub"]
 
