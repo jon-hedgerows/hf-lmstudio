@@ -8,6 +8,12 @@ from typing import NamedTuple
 
 # credit: much of this was written by Ivan Fioravanti
 
+# Terminal key sequences (R7: named constants instead of magic literals).
+KEY_UP = "\x1b[A"
+KEY_DOWN = "\x1b[B"
+KEY_ENTER = "\r"
+KEY_CTRL_C = "\x03"
+
 
 class ModelFormat(str, Enum):
     """Model file format classification (SPEC §2.4).
@@ -64,7 +70,13 @@ def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
     # a fully and correctly symlinked model shows as selected in the UI.
     selected = [bool(choice.is_imported) for choice in model_choices]
     idx = 0
-    window_size = os.get_terminal_size().lines - 5
+    # R6: guard terminal size; fall back to a sensible default when no TTY
+    # or when the computed window would be non-positive.
+    try:
+        window_size = os.get_terminal_size().lines - 5
+    except OSError:
+        window_size = 20
+    window_size = max(window_size, 1)
 
     while True:
         print("\033[H\033[J", end="")
@@ -84,15 +96,15 @@ def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
             )
 
         key = get_key()
-        if key == "\x1b[A":  # Up arrow
+        if key == KEY_UP:
             idx = max(0, idx - 1)
-        elif key == "\x1b[B":  # Down arrow
+        elif key == KEY_DOWN:
             idx = min(len(model_choices) - 1, idx + 1)
         elif key == " ":
             selected[idx] = not selected[idx]
-        elif key == "\r":  # Enter key
+        elif key == KEY_ENTER:
             break
-        elif key == "\x03":  # Ctrl+C
+        elif key == KEY_CTRL_C:
             print("\nImport is cancelled. Do nothing.")
             sys.exit(0)
 
