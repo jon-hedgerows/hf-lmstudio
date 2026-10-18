@@ -128,6 +128,9 @@ class TestDiscoverModels(unittest.TestCase):
 
 
 class TestGetModelType(unittest.TestCase):
+    def tearDown(self):
+        cli._hf_api = None
+
     def test_gguf_local(self):
         snap = Path(tempfile.mkdtemp())
         (snap / "model.gguf").write_bytes(b"\x00" * 10)

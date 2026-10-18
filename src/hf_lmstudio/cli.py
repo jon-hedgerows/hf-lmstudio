@@ -22,6 +22,26 @@ class ModelFormat(str, Enum):
     UNKNOWN = "Unknown"
 
 
+# Shared HfApi client, created lazily and reused across models (F6).
+_hf_api: object | None = None
+
+
+def _get_hf_api():
+    """Return a shared HfApi client with a timeout, or None if unavailable."""
+    global _hf_api
+    if _hf_api is None:
+        try:
+            from huggingface_hub import HfApi
+
+            try:
+                _hf_api = HfApi(timeout=30)
+            except TypeError:
+                _hf_api = HfApi()
+        except ImportError:
+            _hf_api = None
+    return _hf_api
+
+
 def select_models(model_choices):
     # Pre-select models that are already imported (SPEC §2.6 clarification):
     # a fully and correctly symlinked model shows as selected in the UI.
@@ -106,20 +126,18 @@ def get_model_type(snapshot_path: str | Path, repo_id: str) -> ModelFormat:
         return ModelFormat.MLX
 
     # 3. Hub metadata (huggingface_hub is provided by the `hf` runtime, not a
-    #    hard dependency -- imported lazily, SPEC §4).
-    try:
-        from huggingface_hub import HfApi
-    except ImportError:
-        HfApi = None
-
+    #    hard dependency -- imported lazily, SPEC §4). A shared client is
+    #    reused across models with a timeout; HF_HUB_OFFLINE short-circuits
+    #    the call entirely (F6).
     try:
         from huggingface_hub.errors import HfHubHTTPError
     except ImportError:
         HfHubHTTPError = Exception
 
-    if HfApi is not None and not os.environ.get("HF_HUB_OFFLINE"):
+    api = _get_hf_api()
+    if api is not None and not os.environ.get("HF_HUB_OFFLINE"):
         try:
-            info = HfApi().model_info(repo_id)
+            info = api.model_info(repo_id)
             library = (getattr(info, "library_name", None) or "").lower()
             tags = {str(t).lower() for t in (getattr(info, "tags", None) or [])}
             if library == "gguf" or "gguf" in tags or getattr(info, "gguf", None):
