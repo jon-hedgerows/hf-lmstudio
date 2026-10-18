@@ -41,10 +41,11 @@ Models are discovered by scanning the Hugging Face Hub cache directory:
 
 Each discovered model is classified to decide where/how it may be linked:
 
-- **GGUF**: the snapshot directory contains a `.gguf` file.
+- **GGUF**: the snapshot directory contains a `.gguf` file (searched recursively).
 - **MLX**: the repository ID starts with `mlx-community/`.
+- Hub metadata: queried via `huggingface_hub` `HfApi().model_info()`; `library_name` or tags containing `"gguf"`/`"mlx"` are used as additional signals. The call is skipped when `HF_HUB_OFFLINE` is set or the Hub is unreachable.
 - Any other model falls back to reading `model_type` from `config.json`.
-- Models that cannot be classified are reported as unknown.
+- Models that cannot be classified are reported as `"unknown"` and included in discovery for the user to decide whether to link.
 
 ### 2.5 Linking behaviour
 
