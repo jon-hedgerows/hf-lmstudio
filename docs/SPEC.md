@@ -24,10 +24,11 @@ The installed command is `hf lmstudio`.
 
 ### 2.2 Commands
 
-| Command             | Behaviour                                                                                                            |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `hf lmstudio`       | Interactive: list models found in the Hub cache, let the user select which to link, and symlink them into LM Studio. |
-| `hf lmstudio --all` | Link every compatible model without interactive selection.                                                           |
+| Command               | Behaviour                                                                                                            |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `hf lmstudio`         | Interactive: list models found in the Hub cache, let the user select which to link, and symlink them into LM Studio. |
+| `hf lmstudio --all`   | Link every compatible model without interactive selection.                                                           |
+| `hf lmstudio --clean` | Re-Link already-linked models to the current main snapshot, clean any dangling symlinks                              |
 
 ### 2.3 Model discovery
 
@@ -43,17 +44,18 @@ Each discovered model is classified to decide where/how it may be linked:
 
 - **GGUF**: the snapshot directory contains a `.gguf` file (searched recursively).
 - **MLX**: the repository ID starts with `mlx-community/`.
-- Hub metadata: queried via `huggingface_hub` `HfApi().model_info()`; `library_name` or tags containing `"gguf"`/`"mlx"` are used as additional signals. The call is skipped when `HF_HUB_OFFLINE` is set or the Hub is unreachable.
 - Any other model falls back to reading `model_type` from `config.json`; a present `model_type` classifies the model as **Other**.
 - Models that cannot be classified are reported as `"unknown"` and included in discovery for the user to decide whether to link.
 
-The classification is a **format label** (GGUF / MLX / Other / unknown). All discovered models are listed in the interactive selector and may be linked by the user; the label is informational and does not by itself restrict linking.
+The classification is a **format label** (GGUF / MLX / Other / unknown). All discovered models are listed in the interactive selector and may be linked by the user.
+
+**NB.** The label is informational and does not by itself restrict linking.
 
 ### 2.5 Linking behaviour
 
 - The target directory is LM Studio's downloads folder, resolved in order of precedence: `~/.lmstudio/settings.json` (`downloadsFolder`), then `~/.lmstudio/models`.
-- Linking creates a directory of symlinks inside the target, one symlink per file in the model's snapshot directory.
-- If a model is already linked, linking again replaces the existing directory or symlink.
+- Linking creates a symlinked directory pointing to the snapshot directory in the hf cache.
+- If a model is already linked, linking again replaces the existing symlink.
 - Symlinks are used deliberately: model weights remain in the HF cache and are not duplicated.
 
 ### 2.6 Desired state and the interactive selector
@@ -62,18 +64,17 @@ Running `hf lmstudio` presents an interactive selector, and the user's selection
 
 When initialising the list of models in the UI:
 
-- where a model is already fully and correctly symlinked in LM Studio, the model shows in the UI as **selected**
-- where a model is not found in LM Studio, or the symlinks are incomplete, the model shows in the UI as **unselected**
+- where a model is already symlinked in LM Studio (to any snapshot in the model), the model shows in the UI as **selected**
+- where a model is not found in LM Studio the model shows in the UI as **unselected**
 
 The User can then select or deselect individual models.
 
-- **Selected** models must end up linked (symlinked) into LM Studio.
+- **Selected** models must end up symlinked into LM Studio.
 - **Unselected** models must end up _not_ linked — any existing link for them is removed.
-- Dangling symlinks in the LM Studio models directory (links to models that are no longer in the hf cache) are removed if they point towards files in the HuggingFace cache. If this removal leaves a directory empty, then the directory is removed.
-- directories must not be removed unless they previously contained a symlink to the hf cache.
-- No existing _files_ are ever modified; existing symlinks may be updated, created, or removed; directory structures should be updated, created, or removed as required.
+- Dangling symlinks in the LM Studio models directory (links to models that are no longer in the hf cache) are removed if they point towards files in the HuggingFace cache.
+- No existing _files_ or _directories_ are ever modified; existing symlinks may be updated, created, or removed.
 
-The existing links are reported when discovered (models already imported are annotated as such).
+Existing links are reported when discovered (models already imported are annotated as such).
 
 ### 2.7 Interactive UI
 
@@ -100,6 +101,6 @@ The module is designed to run under `uvx` execution of the installed `hf` extens
 
 ## 5. Development Workflow
 
-- Source lives in `src/hf_lmstudio/`; tests live in `tests/` (currently no tests are written — `tests/README.md` records this).
+- Source lives in `src/hf_lmstudio/`; tests live in `tests/`
 - Build artefacts (`build/`, `dist/`, `*.egg-info/`, `__pycache__/`, `*.pyc`) and virtual environments (`.venv/`) are excluded from version control and should not be committed.
 - Documentation for the design intent covered in `Design.md` is to be updated in line with the actual design in accordance with this specification. The design file remains in the repository as explanatory material.

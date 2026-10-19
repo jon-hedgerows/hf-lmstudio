@@ -20,6 +20,8 @@ Select and link models interactively: `hf lmstudio`
 
 Link all models: `hf lmstudio --all`
 
+Clean up dangling links, relink already-linked models to current snapshots: `hf lmstudio --clean`
+
 ### Requirements
 
 - The `hf` CLI from `huggingface_hub` >= 1.23 (On MacOS `brew install hf`).
