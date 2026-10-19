@@ -8,3 +8,5 @@ venv/
 *.py[cod]
 build/
 dist/
+
+.ruff_cache
