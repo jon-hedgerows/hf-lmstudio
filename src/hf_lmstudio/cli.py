@@ -1,3 +1,4 @@
+"""hf-lmstudio: Link models in the hf cache to the LM Studio/Bionic downloads folder."""
 import argparse
 import json
 import logging
@@ -6,28 +7,30 @@ import sys
 from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
-from itertools import chain
+
+try:
+    from hf_lmstudio import __version__
+except Exception:  # noqa: BLE001  # pragma: no cover
+    __version__ = "0.0.0"
 
 # credit: much of this was written by Ivan Fioravanti
 
 logger = logging.getLogger("hf_lmstudio")
 
-# Terminal key sequences (R7: named constants instead of magic literals).
+# Terminal key sequences.
 KEY_UP = "\x1b[A"
 KEY_DOWN = "\x1b[B"
 KEY_ENTER = "\r"
 KEY_CTRL_C = "\x03"
 
-# Seconds to wait for a Hub metadata request (N4: applied to model_info()).
-HUB_TIMEOUT_SECONDS = 30
+# Default locations.
+DEFAULT_HF_HOME = "~/.cache/huggingface"
+DEFAULT_LM_STUDIO_MODELS = "~/.lmstudio/models"
+LM_STUDIO_SETTINGS = "~/.lmstudio/settings.json"
 
 
 class ModelFormat(str, Enum):
-    """Model file format classification (SPEC §2.4).
-
-    Using str, Enum keeps values comparable to plain strings while giving
-    an explicit, documented set of formats.
-    """
+    """Model file format classification (SPEC section 2.4)."""
 
     GGUF = "GGUF"
     MLX = "MLX"
@@ -35,31 +38,13 @@ class ModelFormat(str, Enum):
     UNKNOWN = "Unknown"
 
 
-def _fetch_model_info(api, repo_id):
-    """Call ``api.model_info`` with a timeout (N4).
-
-    ``timeout`` was added to ``HfApi.model_info`` in newer huggingface_hub
-    releases; fall back to a call without it on versions that reject it.
-    """
-    try:
-        return api.model_info(repo_id, timeout=HUB_TIMEOUT_SECONDS)
-    except TypeError:
-        return api.model_info(repo_id)
-
-
-def _hub_offline() -> bool:
-    """True when ``HF_HUB_OFFLINE`` is set to a truthy value (F6)."""
-    value = os.environ.get("HF_HUB_OFFLINE", "").strip().lower()
-    return value not in ("", "0", "false", "no")
-
-
 def _warn(message: str) -> None:
-    """Print a warning/status message to stderr (R5)."""
+    """Print a warning/status message to stderr."""
     print(message, file=sys.stderr)
 
 
 class DiscoveredModel(NamedTuple):
-    """A model discovered in the Hugging Face cache (R1)."""
+    """A model discovered in the Hugging Face cache."""
 
     model_type: ModelFormat
     model_name: str
@@ -67,7 +52,7 @@ class DiscoveredModel(NamedTuple):
 
 
 class ModelChoice(NamedTuple):
-    """A model presented to the user in the interactive selector (R1)."""
+    """A model presented to the user in the interactive selector."""
 
     display_name: str
     model_name: str
@@ -76,12 +61,12 @@ class ModelChoice(NamedTuple):
 
 
 def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
-    # Pre-select models that are already imported (SPEC §2.6 clarification):
-    # a fully and correctly symlinked model shows as selected in the UI.
+    """Render the interactive selector and return the chosen models."""
+    if not model_choices:
+        return []
+
     selected = [bool(choice.is_imported) for choice in model_choices]
     idx = 0
-    # R6: guard terminal size; fall back to a sensible default when no TTY
-    # or when the computed window would be non-positive.
     try:
         window_size = os.get_terminal_size().lines - 5
     except OSError:
@@ -89,9 +74,12 @@ def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
     window_size = max(window_size, 1)
 
     while True:
-        print("\033[H\033[J", end="")
+        if sys.stdout.isatty():
+            print("\033[H\033[J", end="")
         print(
-            "❯ hf lmstudio - Hugging Face to LM Studio Model Link \nAvailable models (↑/↓ to navigate, SPACE to select, ENTER to confirm, Ctrl+C to quit):"
+            "❯ hf lmstudio - Hugging Face to LM Studio Model Link \n"
+            "Available models (↑/↓ to navigate, SPACE to select, ENTER to confirm, "
+            "Ctrl+C to quit):"
         )
 
         window_start = max(
@@ -102,7 +90,8 @@ def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
         for i in range(window_start, window_end):
             display_name = model_choices[i].display_name
             print(
-                f"{'>' if i == idx else ' '} {'◉' if selected[i] else '○'} {display_name}"
+                f"{'>' if i == idx else ' '} "
+                f"{'◉' if selected[i] else '○'} {display_name}"
             )
 
         key = get_key()
@@ -112,29 +101,31 @@ def select_models(model_choices: list[ModelChoice]) -> list[ModelChoice]:
             idx = min(len(model_choices) - 1, idx + 1)
         elif key == " ":
             selected[idx] = not selected[idx]
-        elif key == KEY_ENTER:
+        elif key in (KEY_ENTER, "\n"):
             break
         elif key == KEY_CTRL_C:
             print("\nImport is cancelled. Do nothing.")
-            sys.exit(0)
+            sys.exit(130)
 
     return [
         choice
-        for choice, is_selected in zip(model_choices, selected, strict=False)
+        for choice, is_selected in zip(model_choices, selected, strict=True)
         if is_selected
     ]
 
 
-def get_key():
-    """Get a single keypress from the user."""
+def get_key() -> str:
+    """Read a single keypress from stdin."""
     import termios
     import tty
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
-        tty.setraw(sys.stdin.fileno())
+        tty.setraw(fd)
         ch = sys.stdin.read(1)
+        if not ch:
+            return ""
         if ch == "\x1b":
             ch += sys.stdin.read(2)
     finally:
@@ -143,16 +134,15 @@ def get_key():
 
 
 def _classify_via_config(path: Path) -> ModelFormat | None:
-    """config.json fallback: any present ``model_type`` means "Other".
-
-    Architecture is deliberately not part of the format contract (SPEC §2.4).
-    """
+    """config.json fallback: any present ``model_type`` means "Other"."""
     config_path = path / "config.json"
-    if not config_path.exists():
+    if not config_path.is_file():
         return None
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(config, dict):
         return None
     value = config.get("model_type")
     if isinstance(value, str) and value:
@@ -161,181 +151,172 @@ def _classify_via_config(path: Path) -> ModelFormat | None:
 
 
 def get_model_type(snapshot_path: str | Path, repo_id: str) -> ModelFormat:
-    """Classify a model's file format (SPEC §2.4).
-
-    Tiers, in order: local GGUF check, mlx-community organisation check,
-    config.json model_type fallback. Returns ModelFormat.UNKNOWN when nothing
-    applies; such models are included in the discovery list for user selection
-    (clarification to SPEC §2.4).
-    """
+    """Classify a model's file format (SPEC section 2.4)."""
     path = Path(snapshot_path)
     if not path.is_dir():
         return ModelFormat.UNKNOWN
 
-    # 1. Local GGUF check (recursive: snapshots preserve subdirectories,
-    #    and GGUF repos commonly place files in per-quantisation folders).
-    if any(p.is_file() and p.suffix.lower() == ".gguf" for p in path.rglob("*")):
+    if any(
+        p.is_file() and p.suffix.lower() == ".gguf" for p in path.rglob("*")
+    ):
         return ModelFormat.GGUF
 
-    # 2. Organisation check (case-insensitive).
     if repo_id.lower().startswith("mlx-community/"):
         return ModelFormat.MLX
 
-    # 3. config.json fallback.
     result = _classify_via_config(path)
-
-    # 4. Could not classify.
     return result if result is not None else ModelFormat.UNKNOWN
 
 
-def manage_models(autolink_all: bool = False, justClean: bool = False) -> None:
-    """Link models from the Hugging Face cache."""
-    # the hub dir is set by $HF_HUB_CACHE if defined, or $HF_HOME/hub if defined, or ~/.cache/huggingface/hub
-    hub_dir = Path(
-        os.environ.get(
-            "HF_HUB_CACHE",
-            os.path.join(
-                os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
-                "hub",
-            ),
-        )
-    )
-    # the lm studio models dir is defined in settings.json, or is ~/.lmstudio/models
+def _resolve_hub_dir() -> Path:
+    """Resolve the Hugging Face Hub cache directory."""
+    hf_hub_cache = os.environ.get("HF_HUB_CACHE", "").strip()
+    if hf_hub_cache:
+        return Path(hf_hub_cache).expanduser()
+    hf_home = os.environ.get("HF_HOME", "").strip()
+    if hf_home:
+        return (Path(hf_home).expanduser() / "hub")
+    return (Path(DEFAULT_HF_HOME).expanduser() / "hub")
+
+
+def _resolve_lm_studio_dir() -> Path:
+    """Resolve LM Studio's downloads folder."""
+    settings_path = Path(LM_STUDIO_SETTINGS).expanduser()
     try:
-        settings_path = Path(os.path.expanduser("~/.lmstudio/settings.json"))
-        with open(settings_path) as settings_file:
+        with settings_path.open(encoding="utf-8") as settings_file:
             settings = json.load(settings_file)
-        downloads_folder = settings.get("downloadsFolder")
-        if downloads_folder:
-            lm_studio_dir = Path(downloads_folder)
-        else:
-            lm_studio_dir = Path(os.path.expanduser("~/.lmstudio/models"))
-    except (json.JSONDecodeError, FileNotFoundError, KeyError, OSError):
-        # if there's an error while reading the models dir, set it to the default
-        lm_studio_dir = Path(os.path.expanduser("~/.lmstudio/models"))
+        if isinstance(settings, dict):
+            downloads_folder = settings.get("downloadsFolder")
+            if isinstance(downloads_folder, str) and downloads_folder.strip():
+                return Path(downloads_folder).expanduser()
+    except (OSError, ValueError, KeyError):
+        pass
+    return Path(DEFAULT_LM_STUDIO_MODELS).expanduser()
+
+
+def manage_models(
+    autolink_all: bool = False,
+    just_clean: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Link models from the Hugging Face cache."""
+    hub_dir = _resolve_hub_dir().resolve(strict=False)
+    lm_studio_dir = _resolve_lm_studio_dir().resolve(strict=False)
 
     discovered = discover_models(hub_dir)
     if not discovered:
         print("No models found in Hugging Face cache")
 
-    desired = select_desired(discovered, autolink_all, lm_studio_dir, justClean)
+    desired = select_desired(discovered, autolink_all, lm_studio_dir, just_clean)
+    if dry_run:
+        print("Dry run: no changes will be made.")
+        print(f"Would link ({len(desired)}): {', '.join(sorted(desired)) or '(none)'}")
+        would_unlink = {
+            model.model_name for model in discovered
+            if model.model_name not in desired
+        }
+        print(
+            f"Would unlink ({len(would_unlink)}): "
+            f"{', '.join(sorted(would_unlink)) or '(none)'}"
+        )
+        print("Would remove dangling symlinks pointing into the Hugging Face cache.")
+        return
+
     if discovered:
         print(f"\nLinking {len(desired)} of {len(discovered)} models...\n")
     apply_desired_state(lm_studio_dir, discovered, desired)
-    # Always clean up dangling links, even when nothing was discovered: a
-    # model removed from the Hub cache leaves dangling links behind
-    # (SPEC §2.6, §6.3).
     cleanup_dangling_links(lm_studio_dir, hub_dir)
 
 
 def discover_models(hub_dir: str | Path) -> list[DiscoveredModel]:
-    """Discover and classify models in the Hugging Face Hub cache.
-
-    Returns a list of DiscoveredModel records. Unclassifiable models are
-    labelled ModelFormat.UNKNOWN and included so the user can decide whether
-    to link them (clarification to SPEC §2.4); discovery never crashes on
-    unusual cache layout (SPEC §2.3).
-    """
+    """Discover and classify models in the Hugging Face Hub cache."""
     found_models: list[DiscoveredModel] = []
     seen_models: set[str] = set()
     hub_path = Path(hub_dir)
+    if not hub_path.is_dir():
+        return found_models
+
     for model_dir in hub_path.glob("models--*"):
         refs_dir = model_dir / "refs"
         snapshots_dir = model_dir / "snapshots"
-        if not refs_dir.exists():
+        if not refs_dir.is_dir():
             continue
 
-        # R4: derive repo id from the final path component only.
         model_name = model_dir.name.removeprefix("models--").replace("--", "/")
-
-        # Dedupe discovered models by model name: first snapshot wins.
         if model_name in seen_models:
             continue
 
-        # Search for refs, continuing on to other tags if main is broken (why?)
-        for ref_file in chain(refs_dir.glob("main"), refs_dir.glob("*")):
-            # Skip directory entries in refs/ (e.g. refs/refs/pr/1)
-            # described in docs/huggingface-cache.md (SPEC §2.3).
-            if not ref_file.is_file():
-                continue
+        ref_candidates: list[Path] = []
+        main_ref = refs_dir / "main"
+        if main_ref.is_file():
+            ref_candidates.append(main_ref)
+        ref_candidates.extend(
+            p for p in refs_dir.glob("*")
+            if p.is_file() and p != main_ref
+        )
+
+        for ref_file in ref_candidates:
             try:
-                with open(ref_file, encoding="utf-8") as f:
-                    ref = f.read()
+                with ref_file.open(encoding="utf-8") as f:
+                    ref = f.read().strip()
             except OSError:
-                # Report and skip unreadable refs rather than crashing.
                 _warn(f"Skipping {model_name}: could not read ref {ref_file}")
                 continue
-            # now have a snapshot reference, determine the snapshot path
+            if not ref:
+                continue
+
             snapshot_path = snapshots_dir / ref
             if not snapshot_path.is_dir():
-                # Snapshot no longer in the cache (model removed). Skip it from
-                # discovery so any existing link is left for
-                # cleanup_dangling_links to remove.
                 _warn(f"Skipping {model_name}: snapshot no longer in cache")
                 continue
 
-            # Determine model type accurately using the helper function.
             model_type = get_model_type(snapshot_path, model_name)
-
-            # Store model_type, model_name, and snapshot_path
-            found_models.append(DiscoveredModel(model_type, model_name, snapshot_path))
+            found_models.append(
+                DiscoveredModel(model_type, model_name, snapshot_path)
+            )
             seen_models.add(model_name)
             break
+
     return found_models
 
 
-def is_fully_linked(lm_dir: Path, model_name: str, snapshot_path: Path) -> bool:
-    """Return True if ``lm_dir/model_name`` is symlinked to ``snapshot_path``
-    (SPEC §2.6 UI initialization).
-
-    A model shows in the UI as **selected** only when it is already
-    symlinked to either the snapshot_path or a sibling (i.e. out of date);
-    it shows as **unselected** when not found in LM
-    Studio.
-    """
-    target_path = lm_dir.joinpath(model_name)
-
-    # if the target does not exist, then it's not linked
-    if not target_path.exists():
-        return False
-
-    # if it's not a symlink it's not linked
+def is_fully_linked(
+    lm_dir: Path, model_name: str, snapshot_path: Path
+) -> bool:
+    """Return True if ``lm_dir/model_name`` links to this model's snapshot dir."""
+    target_path = lm_dir / model_name
     if not target_path.is_symlink():
         return False
 
-    # if the parent of the target (i.e. the hf model dir) matches,
-    # then it's either the right snapshot, or another one
-    # either way, we treat it as linked (and fixup the link later)
-    if target_path.readlink().parent.samefile(snapshot_path.parent):
-        return True
-
-    # in all other cases, we consider it not linked
-    return False
+    try:
+        raw_target = target_path.readlink()
+        resolved_target = (
+            raw_target if raw_target.is_absolute()
+            else target_path.parent / raw_target
+        ).resolve(strict=False)
+        return (
+            resolved_target.parent
+            == Path(snapshot_path).resolve(strict=False).parent
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def select_desired(
-    models: list[DiscoveredModel], autolink_all: bool, lm_dir: Path, justClean: bool
+    models: list[DiscoveredModel],
+    autolink_all: bool,
+    lm_dir: Path,
+    just_clean: bool = False,
 ) -> set[str]:
-    """Return the set of model names the user wants linked (desired state).
-
-    With --all, every classifiable model is selected without a terminal
-    (SPEC §2.2). Otherwise the interactive menu defines desired state
-    (SPEC §2.6): selected models must end up linked, unselected models must
-    end up unlinked.
-
-    With --clean, the existing state as determined from inspecting the
-    directories is retained, no user interaction is required.
-
-    UI initialization: a model shows as selected when it is already fully and
-    correctly symlinked in LM Studio; it shows as unselected when not found
-    or when the symlinks are incomplete.
-    """
+    """Return the set of model names the user wants linked."""
     if autolink_all:
         return {model.model_name for model in models}
 
     model_choices: list[ModelChoice] = []
     for model in sorted(models, key=lambda m: m.model_name.lower()):
-        is_imported = is_fully_linked(lm_dir, model.model_name, model.snapshot_path)
+        is_imported = is_fully_linked(
+            lm_dir, model.model_name, model.snapshot_path
+        )
         status = " (already imported)" if is_imported else ""
         display_name = f"({model.model_type.value}) {model.model_name}{status}"
         model_choices.append(
@@ -344,101 +325,100 @@ def select_desired(
             )
         )
 
-    if not justClean:
+    if not model_choices:
+        return set()
+
+    if not just_clean:
         selected = select_models(model_choices)
         return {choice.model_name for choice in selected}
-    else:
-        return {choice.model_name for choice in model_choices if choice.is_imported}
+    return {choice.model_name for choice in model_choices if choice.is_imported}
 
 
 def _link_model(lm_dir: Path, model_name: str, snapshot_path: Path) -> None:
-    """Link the snapshot dir into ``lm_dir/model_name`` (SPEC §2.5)."""
-    target_path = lm_dir.joinpath(model_name)
-    # _warn(
-    #     f" lm_dir: {lm_dir.name}\n model_name: {model_name}\n target_path: {target_path.parts}\n target_path.parent: {target_path.parent.parts}\n snapshot_path: {snapshot_path.parts}"
-    # )
-    if target_path.exists() and not target_path.is_symlink():
-        # Real file at the link target: never touch it.
-        _warn(f"Skipping {model_name}: real directory at link target")
+    """Link the snapshot dir into ``lm_dir/model_name``."""
+    target_path = lm_dir / model_name
+    if any(part in ("", ".", "..") for part in Path(model_name).parts):
+        _warn(f"Skipping {model_name}: link target escapes LM Studio directory")
         return
-    if target_path.exists() and target_path.is_symlink():
-        # Replace an existing symlink
-        # _warn(f"Removing existing symlink at target_path")
-        target_path.unlink()
-    # ensuree the parent dir (and any other parents) already exist
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    # link the model dir
-    target_path.symlink_to(snapshot_path)
+
+    resolved_snapshot = Path(snapshot_path).resolve(strict=False)
+    if target_path.is_symlink():
+        try:
+            target_path.unlink()
+        except OSError as exc:
+            _warn(f"Skipping {model_name}: unable to replace link ({exc})")
+            return
+    elif target_path.exists():
+        _warn(f"Skipping {model_name}: real file or directory at link target")
+        return
+
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.symlink_to(resolved_snapshot)
+    except OSError as exc:
+        _warn(f"Skipping {model_name}: unable to create link ({exc})")
+        return
     print(f"Linked {model_name}")
 
 
 def _unlink_model(lm_dir: Path, model_name: str) -> None:
-    """Remove link we created for ``model_name``"""
-    target_path = lm_dir.joinpath(model_name)
-    if target_path.is_symlink():
-        try:
-            target_path.unlink()
-            print(f"Unlinked {model_name}")
-        except OSError:
-            print(f"Skipping {model_name}: unable to unlink")
+    """Remove a link created for ``model_name``."""
+    target_path = lm_dir / model_name
+    if not target_path.is_symlink():
+        return
+    try:
+        target_path.unlink()
+        print(f"Unlinked {model_name}")
+    except OSError as exc:
+        _warn(f"Skipping {model_name}: unable to unlink ({exc})")
 
 
 def apply_desired_state(
-    lm_dir: Path,
-    discovered: list[DiscoveredModel],
-    desired: set[str],
+    lm_dir: Path, discovered: list[DiscoveredModel], desired: set[str]
 ) -> None:
-    """Make the LM Studio dir match the desired state (SPEC §2.5, §2.6).
-
-    Selected models are symlinked into the HF cache;
-    unselected models have any existing link removed. Real files or
-    directories  are never modified or deleted; only other
-    symlinks are created or removed.
-    """
+    """Make the LM Studio dir match the desired state."""
+    root = Path(lm_dir).resolve(strict=False)
     for model in discovered:
-        if model.model_name in desired:
-            _link_model(lm_dir, model.model_name, model.snapshot_path)
-        else:
-            _unlink_model(lm_dir, model.model_name)
+        try:
+            if model.model_name in desired:
+                _link_model(root, model.model_name, model.snapshot_path)
+            else:
+                _unlink_model(root, model.model_name)
+        except OSError as exc:
+            _warn(f"Failed to update {model.model_name}: {exc}")
 
 
 def cleanup_dangling_links(lm_dir: Path, hub_dir: Path) -> None:
-    """Remove dangling symlinks that point into the HF cache, then prune
-    now-empty directories (SPEC §2.6).
+    """Remove dangling symlinks into the HF cache and prune empty dirs."""
+    root = Path(lm_dir).resolve(strict=False)
+    hub_root = Path(hub_dir).resolve(strict=False)
+    if not root.is_dir():
+        return
 
-    This also removes links for models that have been removed from the Hub
-    cache: once the snapshot disappears, those symlinks dangle and are
-    cleaned up here. Only symlinks resolving inside hub_dir are candidates;
-    other dangling links are left alone. lm_dir itself is never removed.
-    """
-    hub_dir = hub_dir.resolve()
-
-    # Bottom-up: handle entries before their containing directories.
-    for root, dirs, files in os.walk(lm_dir, topdown=False):
-        root_path = Path(root)
-        for name in list(files) + list(dirs):
+    for walk_root, _dirs, _files in os.walk(root, topdown=False):
+        root_path = Path(walk_root)
+        for name in list(_files) + list(_dirs):
             entry = root_path / name
-            if not entry.is_symlink():
-                continue
-            # Dangling symlink: the target no longer exists on disk.
-            if os.path.exists(entry):
+            if not entry.is_symlink() or entry.exists():
                 continue
             try:
                 target = os.readlink(entry)
-                resolved = (root_path.joinpath(target)).resolve()
+                resolved = (root_path / target).resolve(strict=False)
+            except (OSError, RuntimeError):
+                continue
+            if resolved != hub_root and hub_root not in resolved.parents:
+                continue
+            try:
+                entry.unlink()
             except OSError:
                 continue
-            # Only remove links that point into the Hugging Face cache.
-            if resolved == hub_dir or hub_dir in resolved.parents:
-                entry.unlink()
 
-    # Prune empty directories left behind, never removing lm_dir itself.
-    for root, _dirs, _files in os.walk(lm_dir, topdown=False):
-        root_path = Path(root)
-        if root_path == lm_dir:
+    for walk_root, _dirs, _files in os.walk(root, topdown=False):
+        root_path = Path(walk_root)
+        if root_path == root:
             continue
         try:
-            root_path.rmdir()  # succeeds only when the directory is empty
+            root_path.rmdir()
         except OSError:
             pass
 
@@ -461,14 +441,35 @@ def main() -> None:
         action="store_true",
         help="Clean the LM Studio/Bionic downloads folder, (re)linking previously selected models, removing dangling symlinks, but not adding anything new",
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"hf-lmstudio {__version__}",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the planned changes without modifying the filesystem",
+    )
+
     args = parser.parse_args()
     if not (args.all or args.clean) and not sys.stdin.isatty():
         parser.error(
             "no terminal available for interactive selection; "
-            "use --all to link every model without a prompt, or"
+            "use --all to link every model without a prompt, or "
             "use --clean to relink/clean models without a prompt"
         )
-    manage_models(autolink_all=args.all, justClean=args.clean)
+
+    try:
+        manage_models(
+            autolink_all=args.all, just_clean=args.clean, dry_run=args.dry_run
+        )
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        sys.exit(130)
+    except Exception as exc:  # noqa: BLE001
+        _warn(f"error: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

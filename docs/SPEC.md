@@ -103,4 +103,4 @@ The module is designed to run under `uvx` execution of the installed `hf` extens
 
 - Source lives in `src/hf_lmstudio/`; tests live in `tests/`
 - Build artefacts (`build/`, `dist/`, `*.egg-info/`, `__pycache__/`, `*.pyc`) and virtual environments (`.venv/`) are excluded from version control and should not be committed.
-- Documentation for the design intent covered in `Design.md` is to be updated in line with the actual design in accordance with this specification. The design file remains in the repository as explanatory material.
+- This specification is the source of truth for behaviour; no separate design document is maintained.

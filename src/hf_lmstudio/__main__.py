@@ -1,3 +1,6 @@
+"""Run ``hf-lmstudio`` as a module."""
+
 from hf_lmstudio.cli import main
 
-main()
+if __name__ == "__main__":
+    main()

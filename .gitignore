@@ -10,3 +10,4 @@ build/
 dist/
 
 .ruff_cache
+.mypy_cache

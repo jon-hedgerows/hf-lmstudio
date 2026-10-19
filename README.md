@@ -25,6 +25,7 @@ Clean up dangling links, relink already-linked models to current snapshots: `hf 
 ### Requirements
 
 - The `hf` CLI from `huggingface_hub` >= 1.23 (On MacOS `brew install hf`).
+- Runtime note: this package declares no runtime dependencies of its own; it relies on the `hf`/`huggingface_hub` environment provided by the `hf` CLI.
 
 ## Acknowledgements
 

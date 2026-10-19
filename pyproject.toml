@@ -1,17 +1,14 @@
 [build-system]
-requires = ["setuptools>=65", "wheel"]
+requires = ["setuptools>=65", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hf-lmstudio"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Link models in the hf cache to the LM Studio/Bionic downloads folder."
 authors = [{ name = "Jon Davies" }, { name = "Ivan Fioravanti" }]
 requires-python = ">=3.10"
 dependencies = []
-
-[project.optional-dependencies]
-dev = ["ruff==0.17.1"]
 license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -22,11 +19,23 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
 ]
-[project.urls]
-homepage = "https://github.com/jon-hedgerows/hf-lmstudio"
+
+[project.optional-dependencies]
+dev = ["ruff==0.17.1", "mypy>=1.10"]
 
 [project.scripts]
 hf-lmstudio = "hf_lmstudio.cli:main"
+
+[project.urls]
+homepage = "https://github.com/jon-hedgerows/hf-lmstudio"
+
+[tool.setuptools_scm]
+fallback_version = "0.0.0"
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.ruff]
 target-version = "py310"
